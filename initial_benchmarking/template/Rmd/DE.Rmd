@@ -1,0 +1,744 @@
+# Init
+
+Packages and functions are loaded, the sce object is laoded, 
+and variables are set.
+
+```{r}
+grpID <- "group"
+btchID <- "batch"
+smplID <- "sample"
+
+options(digits = 2)
+library(scran)
+library(scater)
+library(ggplot2)
+library(data.table)
+library(biomaRt)
+
+nproc <- parallel::detectCores() - 1
+param <- SnowParam(workers = nproc, type = "SOCK")
+
+sce <- readRDS("intermediate_data/normed.rds")
+```
+
+Note that some more libraries are loaded later.
+
+```{r, echo = FALSE}
+write("Starting DE log", "intermediate_data/DE.log")
+```
+
+
+
+
+
+# (PART) Differential Expression {-}
+
+
+
+
+
+# edgeR
+
+We start with edgeR 
+[Robinson et al](https://academic.oup.com/bioinformatics/article-lookup/doi/10.1093/bioinformatics/btp616).
+This is a very established method used for analysis of bulk RNA-seq data.
+This will be the representative for bulk methods.
+edgeR uses count data and does its own normalization.
+
+The results of all different methods will be collected in a 
+vector `resVec` for later comparison.
+If the method can for some reason not return valid p values for some genes
+this will be saved in vector `noCall`.
+
+```{r}
+resVec <- list()
+noCall <- list()
+```
+
+I also want to record CPU time used, so relevant functions will be wrapped in
+`system.time`.
+
+## Pooling Batches
+
+Since groups are completely confounded with batches, batch effects cannot be 
+blocked.
+Here, the usual approach of pooling all cells -- as if they would 
+originate from one batch -- is used.
+
+```{r}
+library(edgeR)
+groups <- sce[[grpID]]
+dge <- DGEList(counts = counts(sce), group = groups)
+dge <- calcNormFactors(dge)
+design <- model.matrix(~ groups)
+system.time({
+  dge <- estimateDisp(dge, design)
+  fit <- glmFit(dge, design)
+  lrt <- glmLRT(fit, coef = 2)
+})
+plotBCV(dge)
+
+# get results
+res <- topTags(lrt, n = Inf)$table
+res$gene <- as.numeric(
+  gsub("([A-Za-z]+)([0-9]+)", "\\2", rownames(res))
+)
+res$rank <- 1:nrow(res)
+res <- res[, -3:-1]
+names(res)[1] <- "pVal"
+res <- as.data.table(res)
+res <- res[order(res$gene), ]
+res$label <- fData(sce)$label
+
+# quick look at results
+summary(res$pVal)
+notOk <- sum(!complete.cases(res))
+res <- res[complete.cases(res), ]
+hist(res$pVal, main = "P Value Distribution")
+table(res$FDR < 0.01)
+res[, .(TP = sum(FDR < 0.01 & label != "random"), 
+        FP = sum(FDR < 0.01 & label == "random"), 
+        TN = sum(FDR >= 0.01 & label == "random"), 
+        FN = sum(FDR >= 0.01 & label != "random")), by = label]
+
+resVec$edgeR_pool <- res
+noCall$edgeR_pool <- notOk
+```
+
+```{r echo = FALSE}
+write("Done edgeR pooled", "intermediate_data/DE.log", append = TRUE)
+```
+
+## Summation over Batches
+
+Another strategy described by 
+[Lun et al](https://academic.oup.com/biostatistics/article/2970368/Overcoming-confounding-plate-effects-in) 
+where genewise expression is summed over all cells within each batch.
+This is supposed to restore FDR control.
+
+```{r}
+batches <- as.factor(sce[[btchID]])
+l <- lapply(levels(batches), function(i) {
+  rowSums(counts(sce)[, which(batches == i)])
+})
+m <- do.call("cbind", l)
+groups <- rep(c("Group1", "Group2"), each = 3)
+dge <- DGEList(counts = m, group = groups)
+dge <- calcNormFactors(dge)
+design <- model.matrix(~ groups)
+system.time({
+  dge <- estimateDisp(dge, design)
+  fit <- glmFit(dge, design)
+  lrt <- glmLRT(fit, coef = 2)
+})
+plotBCV(dge)
+
+# get results
+res <- topTags(lrt, n = Inf)$table
+res$gene <- as.numeric(
+  gsub("([A-Za-z]+)([0-9]+)", "\\2", rownames(res))
+)
+res$rank <- 1:nrow(res)
+res <- res[, -3:-1]
+names(res)[1] <- "pVal"
+res <- as.data.table(res)
+res <- res[order(res$gene), ]
+res$label <- fData(sce)$label
+
+# quick look at results
+summary(res$pVal)
+notOk <- sum(!complete.cases(res))
+res <- res[complete.cases(res), ]
+hist(res$pVal, main = "P Value Distribution")
+table(res$FDR < 0.01)
+res[, .(TP = sum(FDR < 0.01 & label != "random"), 
+        FP = sum(FDR < 0.01 & label == "random"), 
+        TN = sum(FDR >= 0.01 & label == "random"), 
+        FN = sum(FDR >= 0.01 & label != "random")), by = label]
+
+resVec$edgeR_sum <- res
+noCall$edgeR_sum <- notOk
+```
+
+```{r echo = FALSE}
+write("Done edgeR sum", "intermediate_data/DE.log", append = TRUE)
+```
+
+
+
+
+
+
+# BPSC
+
+Here, gene distributions are assumed to be distributed according to a 
+4 parameter Poisson-Beta distribution.
+(The simulated data is 3 parameter Poisson-Beta distributed.)
+The 4 parameter Poisson-Beta distribution is worked into a generalized
+linear model.
+
+According to the vignette normalized data can be used.
+So, I use 
+[Lun et al](https://genomebiology.biomedcentral.com/articles/10.1186/s13059-016-0947-7) 
+normalized data. 
+However, I think the log2 transformation might be a problem so I transform 
+the data back to a linear scale.
+(This also gave better results than the log transformed data.)
+In case 0 counts are important I will restore them by substracting 1 -- 
+the default offset by scran.
+
+## Pooling Batches
+
+In a first attempt cells of one group are pooled, i.e. batches are ignored.
+
+```{r}
+library(BPSC)
+
+groups <- sce[[grpID]]
+m <- exprs(sce)
+m[m < 0] <- 0
+m <- 2^m - 1
+design <- model.matrix(~ groups)
+doParallel::registerDoParallel(cores = nproc)
+system.time(res <- BPglm(
+  data = m, 
+  controlIds = which(groups == "Group1"), 
+  design = design, 
+  coef = 2,
+  estIntPar = TRUE,
+  useParallel = TRUE
+))
+
+# get results
+pVals <- res$PVAL
+fdrs <- p.adjust(pVals, method = "BH")
+genes <- as.numeric(
+  gsub("([A-Za-z]+)([0-9]+)", "\\2", names(res$PVAL))
+)
+res <- data.table(
+  pVal = pVals, 
+  FDR = fdrs, 
+  gene = genes, 
+  rank = rank(pVals)
+)
+res <- res[order(res$gene), ]
+res$label <- fData(sce)$label
+
+# quick look at results
+summary(res$pVal)
+notOk <- sum(!complete.cases(res))
+res <- res[complete.cases(res), ]
+hist(res$pVal, main = "P Value Distribution")
+table(res$FDR < 0.01)
+res[, .(TP = sum(FDR < 0.01 & label != "random"), 
+        FP = sum(FDR < 0.01 & label == "random"), 
+        TN = sum(FDR >= 0.01 & label == "random"), 
+        FN = sum(FDR >= 0.01 & label != "random")), by = label]
+
+resVec$BPSC_pool <- res
+noCall$BPSC_pool <- notOk
+```
+
+```{r echo = FALSE}
+write("Done BPSC pooled", "intermediate_data/DE.log", append = TRUE)
+```
+
+## Batch Correction
+
+Here, data is used which was additionally corrected for batch effects according 
+to [Tung et al](http://www.nature.com/articles/srep39921).
+I also transform the data back to linear scale before fitting.
+
+```{r}
+groups <- sce[[grpID]]
+m <- norm_exprs(sce)
+m[m < 0] <- 0
+m <- 2^m - 1
+design <- model.matrix(~ groups)
+doParallel::registerDoParallel(cores = nproc)
+system.time(res <- BPglm(
+  data = m, 
+  controlIds = which(groups == "Group1"), 
+  design = design, 
+  coef = 2,
+  estIntPar = TRUE,
+  useParallel = TRUE
+))
+
+# get results
+pVals <- res$PVAL
+fdrs <- p.adjust(pVals, method = "BH")
+genes <- as.numeric(
+  gsub("([A-Za-z]+)([0-9]+)", "\\2", names(res$PVAL))
+)
+res <- data.table(
+  pVal = pVals, 
+  FDR = fdrs, 
+  gene = genes, 
+  rank = rank(pVals)
+)
+res <- res[order(res$gene), ]
+res$label <- fData(sce)$label
+
+# quick look at results
+summary(res$pVal)
+notOk <- sum(!complete.cases(res))
+res <- res[complete.cases(res), ]
+hist(res$pVal, main = "P Value Distribution")
+table(res$FDR < 0.01)
+res[, .(TP = sum(FDR < 0.01 & label != "random"), 
+        FP = sum(FDR < 0.01 & label == "random"), 
+        TN = sum(FDR >= 0.01 & label == "random"), 
+        FN = sum(FDR >= 0.01 & label != "random")), by = label]
+
+resVec$BPSC_corr <- res
+noCall$BPSC_corr <- notOk
+```
+
+```{r echo = FALSE}
+write("Done BPSC corr", "intermediate_data/DE.log", append = TRUE)
+```
+
+
+
+
+
+
+
+# scDD
+
+A recently published method by 
+[Korthauer et al](https://genomebiology.biomedcentral.com/articles/10.1186/s13059-016-1077-y) 
+models the genewise distributions of log transformed gene expression as a 
+Dirichlet mixture of normal distributions.
+The method explicitly looks for different types of differential distributions 
+(e.g. differential proportion) by individual scores.
+
+There is an option to use permutations or a Kolmogorov-Smirnov test to 
+estimate significance.
+Both will be tried out.
+
+Since normalized data should be used I will use 
+[Lun et al](https://genomebiology.biomedcentral.com/articles/10.1186/s13059-016-0947-7) normalized data.
+Hoever, the data must be on a linear scale, so I transform it back.
+Also, 0 counts are important, so the default offset of 1 by 
+scran has to be substracted again.
+
+## Pooling Batches -- KS
+
+Samples within batches are pooled, i.e. batches are ignored.
+The KS-test is used.
+
+```{r}
+library(scDD)
+library(SummarizedExperiment)
+
+groups <- sce[[grpID]]
+m <- exprs(sce)
+m[m < 0] <- 0
+m <- 2^m - 1
+se <- SummarizedExperiment(
+  assays = list("NormCounts" = m),
+  colData = data.frame(condition = groups)
+)
+system.time(se <- scDD(
+    se, 
+    prior_param = list(alpha = 0.01, mu0 = 0, s0 = 0.01, 
+                       a0 = 0.01, b0 = 0.01),
+    param = param,
+    permutations = 0,
+    testZeroes = FALSE
+))
+
+# get results
+res <- results(se)
+pVals <- res$nonzero.pvalue
+fdrs <- res$nonzero.pvalue.adj
+genes <- as.numeric(
+  gsub("([A-Za-z]+)([0-9]+)", "\\2", as.character(res$gene))
+)
+res <- data.table(
+  pVal = pVals, 
+  FDR = fdrs, 
+  gene = genes, 
+  rank = rank(pVals)
+)
+res <- res[order(res$gene), ]
+res$label <- fData(sce)$label
+
+# quick look at results
+summary(res$pVal)
+notOk <- sum(!complete.cases(res))
+res <- res[complete.cases(res), ]
+hist(res$pVal, main = "P Value Distribution")
+table(res$FDR < 0.01)
+res[, .(TP = sum(FDR < 0.01 & label != "random"), 
+        FP = sum(FDR < 0.01 & label == "random"), 
+        TN = sum(FDR >= 0.01 & label == "random"), 
+        FN = sum(FDR >= 0.01 & label != "random")), by = label]
+
+resVec$scDD_pool_ks <- res
+noCall$scDD_pool_ks <- notOk
+```
+
+```{r echo = FALSE}
+write("Done scDD pooled KS", "intermediate_data/DE.log", append = TRUE)
+```
+
+## Batch Correction -- KS
+
+Here, batch effects were removed from normalized expression according to 
+[Tung et al](http://www.nature.com/articles/srep39921).
+The KS-test is used.
+
+```{r}
+groups <- sce[[grpID]]
+m <- norm_exprs(sce)
+m[m < 0] <- 0
+m <- 2^m - 1
+se <- SummarizedExperiment(
+  assays = list("NormCounts" = m),
+  colData = data.frame(condition = groups)
+)
+system.time(se <- scDD(
+  se, 
+  prior_param = list(alpha = 0.01, mu0 = 0, s0 = 0.01, 
+                     a0 = 0.01, b0 = 0.01),
+  param = param,
+  permutations = 0,
+  testZeroes = FALSE
+))
+# get results
+res <- results(se)
+pVals <- res$nonzero.pvalue
+fdrs <- res$nonzero.pvalue.adj
+genes <- as.numeric(
+  gsub("([A-Za-z]+)([0-9]+)", "\\2", as.character(res$gene))
+)
+res <- data.table(
+  pVal = pVals, 
+  FDR = fdrs, 
+  gene = genes, 
+  rank = rank(pVals)
+)
+res <- res[order(res$gene), ]
+res$label <- fData(sce)$label
+
+# quick look at results
+summary(res$pVal)
+notOk <- sum(!complete.cases(res))
+res <- res[complete.cases(res), ]
+hist(res$pVal, main = "P Value Distribution")
+table(res$FDR < 0.01)
+res[, .(TP = sum(FDR < 0.01 & label != "random"), 
+        FP = sum(FDR < 0.01 & label == "random"), 
+        TN = sum(FDR >= 0.01 & label == "random"), 
+        FN = sum(FDR >= 0.01 & label != "random")), by = label]
+
+resVec$scDD_corr_ks <- res
+noCall$scDD_corr_ks <- notOk
+```
+
+```{r echo = FALSE}
+write("Done scDD corr KS", "intermediate_data/DE.log", append = TRUE)
+```
+
+
+## Pooling Batches -- Perm
+
+Samples within batches are pooled, i.e. batches are ignored.
+1000 permutations are used.
+
+```{r}
+groups <- sce[[grpID]]
+m <- exprs(sce)
+m[m < 0] <- 0
+m <- 2^m - 1
+se <- SummarizedExperiment(
+  assays = list("NormCounts" = m),
+  colData = data.frame(condition = groups)
+)
+system.time(se <- scDD(
+    se, 
+    prior_param = list(alpha = 0.01, mu0 = 0, s0 = 0.01, 
+                       a0 = 0.01, b0 = 0.01),
+    param = param,
+    permutations = 1000,
+    testZeroes = FALSE
+))
+
+# get results
+res <- results(se)
+pVals <- res$nonzero.pvalue
+fdrs <- res$nonzero.pvalue.adj
+genes <- as.numeric(
+  gsub("([A-Za-z]+)([0-9]+)", "\\2", as.character(res$gene))
+)
+res <- data.table(
+  pVal = pVals, 
+  FDR = fdrs, 
+  gene = genes, 
+  rank = rank(pVals)
+)
+res <- res[order(res$gene), ]
+res$label <- fData(sce)$label
+
+# quick look at results
+summary(res$pVal)
+notOk <- sum(!complete.cases(res))
+res <- res[complete.cases(res), ]
+hist(res$pVal, main = "P Value Distribution")
+table(res$FDR < 0.01)
+res[, .(TP = sum(FDR < 0.01 & label != "random"), 
+        FP = sum(FDR < 0.01 & label == "random"), 
+        TN = sum(FDR >= 0.01 & label == "random"), 
+        FN = sum(FDR >= 0.01 & label != "random")), by = label]
+
+resVec$scDD_pool_perm <- res
+noCall$scDD_pool_perm <- notOk
+```
+
+```{r echo = FALSE}
+write("Done scDD pooled perm", "intermediate_data/DE.log", append = TRUE)
+```
+
+## Batch Correction -- Perm
+
+Here, batch effects were removed from normalized expression according to 
+[Tung et al](http://www.nature.com/articles/srep39921).
+1000 permutations are used.
+
+```{r}
+groups <- sce[[grpID]]
+m <- norm_exprs(sce)
+m[m < 0] <- 0
+m <- 2^m - 1
+se <- SummarizedExperiment(
+  assays = list("NormCounts" = m),
+  colData = data.frame(condition = groups)
+)
+system.time(se <- scDD(
+  se, 
+  prior_param = list(alpha = 0.01, mu0 = 0, s0 = 0.01, 
+                     a0 = 0.01, b0 = 0.01),
+  param = param,
+  permutations = 1000,
+  testZeroes = FALSE
+))
+# get results
+res <- results(se)
+pVals <- res$nonzero.pvalue
+fdrs <- res$nonzero.pvalue.adj
+genes <- as.numeric(
+  gsub("([A-Za-z]+)([0-9]+)", "\\2", as.character(res$gene))
+)
+res <- data.table(
+  pVal = pVals, 
+  FDR = fdrs, 
+  gene = genes, 
+  rank = rank(pVals)
+)
+res <- res[order(res$gene), ]
+res$label <- fData(sce)$label
+
+# quick look at results
+summary(res$pVal)
+notOk <- sum(!complete.cases(res))
+res <- res[complete.cases(res), ]
+hist(res$pVal, main = "P Value Distribution")
+table(res$FDR < 0.01)
+res[, .(TP = sum(FDR < 0.01 & label != "random"), 
+        FP = sum(FDR < 0.01 & label == "random"), 
+        TN = sum(FDR >= 0.01 & label == "random"), 
+        FN = sum(FDR >= 0.01 & label != "random")), by = label]
+
+resVec$scDD_corr_perm <- res
+noCall$scDD_corr_perm <- notOk
+```
+
+```{r echo = FALSE}
+write("Done scDD corr perm", "intermediate_data/DE.log", append = TRUE)
+```
+
+
+
+
+
+
+
+# MAST
+
+Finally, I try out 
+[Finak et al](https://genomebiology.biomedcentral.com/articles/10.1186/s13059-015-0844-5) MAST.
+A hurdle model is fitted with a logistic part for whether a count is 0 and a 
+Gauss for the case that it is not 0.
+The hurdle model is used in a generalized linear model.
+Differentially expressed genes are identified using likelihood ratio tests.
+
+According to the vignette normalized and log transformed data can be used 
+(log2 + 1 TPM).
+So, I assume 
+[Lun et al](https://genomebiology.biomedcentral.com/articles/10.1186/s13059-016-0947-7) 
+normalized log2 should be suitable as well.
+It also has an offset of 1 (by default).
+
+In the `MAITAnalysis` vignette they use the cellular detection rate as
+covariate.
+I will also try that out.
+
+## Pooling Batches
+
+First batches are ignored.
+If applicable the cellular detection rate is used as a covariate -- 
+as described in the `MAITAnalysis` vignette.
+
+```{r}
+library(MAST)
+
+sca <- FromMatrix(
+  exprsArray = exprs(sce),
+  cData = data.frame(wellKey = sce[[smplID]]),
+  fData = data.frame(primerid = fData(sce)$gene)
+)
+groups <- as.factor(sce[[grpID]])
+colData(sca)$condition <- groups
+colData(sca)$cdr <- scale(colSums(assay(sca) > 0))
+if (any(is.na(colData(sca)$cdr))) {
+  f <- formula(~ condition)
+} else {
+  f <- formula(~ condition + cdr)
+}
+options(mc.cores = nproc)
+system.time({
+  fit <- zlm.SingleCellAssay(f, sca)
+  res <- summary(fit, doLRT = "conditionGroup2")
+})
+fit
+
+# get results
+res <- res$datatable
+resdt <- merge(
+  res[contrast == 'conditionGroup2' & 
+        component == 'H', .(primerid, `Pr(>Chisq)`)],
+  res[contrast == 'conditionGroup2' & 
+        component == 'logFC', .(primerid, coef, ci.hi, ci.lo)], 
+  by = 'primerid'
+)
+resdt[, fdr := p.adjust(`Pr(>Chisq)`, "BH")]
+pVals <- resdt$`Pr(>Chisq)`
+fdrs <- resdt$fdr
+genes <- as.numeric(
+  gsub("([A-Za-z]+)([0-9]+)", "\\2", as.character(resdt$primerid))
+)
+res <- data.table(
+  pVal = pVals, 
+  FDR = fdrs, 
+  gene = genes, 
+  rank = rank(pVals)
+)
+res <- res[order(res$gene), ]
+res$label <- fData(sce)$label
+
+# quick look at results
+summary(res$pVal)
+notOk <- sum(!complete.cases(res))
+res <- res[complete.cases(res), ]
+hist(res$pVal, main = "P Value Distribution")
+table(res$FDR < 0.01)
+res[, .(TP = sum(FDR < 0.01 & label != "random"), 
+        FP = sum(FDR < 0.01 & label == "random"), 
+        TN = sum(FDR >= 0.01 & label == "random"), 
+        FN = sum(FDR >= 0.01 & label != "random")), by = label]
+
+resVec$MAST_pool <- res
+noCall$MAST_pool <- notOk
+```
+
+```{r echo = FALSE}
+write("Done MAST pooled", "intermediate_data/DE.log", append = TRUE)
+```
+
+
+
+
+## Batch Correction
+
+Then, batch effects were removed from normalized expression according to 
+[Tung et al](http://www.nature.com/articles/srep39921).
+Here, the cellular detection rate is used again if applicable.
+
+```{r}
+sca <- FromMatrix(
+  exprsArray = norm_exprs(sce),
+  cData = data.frame(wellKey = sce[[smplID]]),
+  fData = data.frame(primerid = fData(sce)$gene)
+)
+groups <- as.factor(sce[[grpID]])
+colData(sca)$condition <- groups
+colData(sca)$cdr <- scale(colSums(assay(sca) > 0))
+if (any(is.na(colData(sca)$cdr))) {
+  f <- formula(~ condition)
+} else {
+  f <- formula(~ condition + cdr)
+}
+options(mc.cores = nproc)
+system.time({
+  fit <- zlm.SingleCellAssay(f, sca)
+  res <- summary(fit, doLRT = "conditionGroup2")
+})
+fit
+
+# get results
+res <- res$datatable
+resdt <- merge(
+  res[contrast == 'conditionGroup2' & 
+        component == 'H', .(primerid, `Pr(>Chisq)`)],
+  res[contrast == 'conditionGroup2' & 
+        component == 'logFC', .(primerid, coef, ci.hi, ci.lo)], 
+  by = 'primerid'
+)
+resdt[, fdr := p.adjust(`Pr(>Chisq)`, "BH")]
+pVals <- resdt$`Pr(>Chisq)`
+fdrs <- resdt$fdr
+genes <- as.numeric(
+  gsub("([A-Za-z]+)([0-9]+)", "\\2", as.character(resdt$primerid))
+)
+res <- data.table(
+  pVal = pVals, 
+  FDR = fdrs, 
+  gene = genes, 
+  rank = rank(pVals)
+)
+res <- res[order(res$gene), ]
+res$label <- fData(sce)$label
+
+# quick look at results
+summary(res$pVal)
+notOk <- sum(!complete.cases(res))
+res <- res[complete.cases(res), ]
+hist(res$pVal, main = "P Value Distribution")
+table(res$FDR < 0.01)
+res[, .(TP = sum(FDR < 0.01 & label != "random"), 
+        FP = sum(FDR < 0.01 & label == "random"), 
+        TN = sum(FDR >= 0.01 & label == "random"), 
+        FN = sum(FDR >= 0.01 & label != "random")), by = label]
+
+resVec$MAST_corr <- res
+noCall$MAST_corr <- notOk
+```
+
+```{r echo = FALSE}
+write("Done MAST corr", "intermediate_data/DE.log", append = TRUE)
+```
+
+```{r echo = FALSE}
+write("Done DE", "intermediate_data/DE.log", append = TRUE)
+```
+
+
+
+
+
+
+
+***

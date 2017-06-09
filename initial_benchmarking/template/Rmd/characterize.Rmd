@@ -1,0 +1,650 @@
+The expression set is converted into a long format as table **allData**.
+
+```{r}
+allData <- data.table(
+  gene = rep(featureNames(sce), ncol(values(sce))),
+  count = as.vector(values(sce)),
+  sample = rep(pData(sce)[[smplID]], each = nrow(values(sce))),
+  batch = rep(pData(sce)[[btchID]], each = nrow(values(sce))),
+  group = rep(pData(sce)[[grpID]], each = nrow(values(sce)))
+)
+```
+
+Statistics about each gene are saved in a table **allStats**,
+statistics for multimodal distributions only in table **allMultis**,
+Poisson-Beta models in table **allPB**,
+other models in list **allModels**,
+and correlations in list **allCors**.
+
+```{r}
+allStats <- data.table(
+  gene = character(),
+  batch = factor(),
+  group = factor(),
+  aveExp = numeric(),
+  ld_aveExp = numeric(),
+  vars = numeric(),
+  ld_vars = numeric(),
+  propZeros = numeric(),
+  norm = logical(),
+  modes = integer()
+)
+allMultis <- data.table(
+  gene = character(),
+  batch = factor(),
+  group = factor(),
+  aveExp = numeric(),
+  ld_aveExp = numeric(),
+  vars = numeric(),
+  ld_vars = numeric(),
+  propZeros = numeric(),
+  norm = logical(),
+  modes = integer(),
+  xVar = numeric(),
+  yVar = numeric()
+)
+allPB <- data.table(
+  gene = character(),
+  batch = factor(),
+  group = factor(),
+  aveExp = numeric(),
+  ld_aveExp = numeric(),
+  vars = numeric(),
+  ld_vars = numeric(),
+  k = numeric(),
+  a = numeric(),
+  b = numeric()
+)
+allModels <- list(batch = list(), group = list())
+allCors <- list(batch = list(), group = list())
+```
+
+This is other general information about the expression set.
+
+```{r}
+(nCells <- ncol(sce))
+(nGenes <- nrow(sce))
+genes <- featureNames(sce)
+(batches <- unique(pData(sce)[[btchID]]))
+(groups <- unique(pData(sce)[[grpID]]))
+```
+
+Furthermore, a mapping table is needed to assign the gorup to each batch number.
+
+```{r}
+mapping <- allData[, .(group = unique(group)), by = batch]
+mapping$id <- match(mapping$batch, as.character(batches))
+```
+
+Let's start.
+
+```{r}
+btchCount <- 1
+```
+
+```{r, child="perBatch.Rmd"}
+```
+
+```{r, child="perBatch.Rmd"}
+```
+
+```{r, child="perBatch.Rmd"}
+```
+
+```{r, child="perBatch.Rmd"}
+```
+
+```{r, child="perBatch.Rmd"}
+```
+
+```{r, child="perBatch.Rmd"}
+```
+
+```{r}
+grpCount <- 1
+```
+
+
+
+
+```{r, child="perGroup.Rmd"}
+```
+
+```{r, child="perGroup.Rmd"}
+```
+
+
+
+
+
+
+
+# Whole Dataset
+
+## Number of Cells
+
+Number of cells per batch are compared among groups.
+
+```{r}
+smpls <- allData[, .(batch = unique(batch), group = unique(group)), by = sample]
+Barplot(smpls$batch, smpls$group, "batch", "group", "Number of Cells per Batch")
+```
+
+## Library Sizes
+
+Library size distributions are compared among groups.
+
+```{r}
+libs <- allData[, .(group = group, batch = batch, size = sum(count)), by = sample]
+lib_grpMeans <- libs[, .(m = mean(size)), by = group]$m
+Hist(libs$size, "library size", lib_grpMeans, main = "Library Sizes and their Group Means", ld = TRUE)
+Dens(libs$size, libs$group, "library size", "group", ld = TRUE)
+```
+
+
+## Average Expression
+
+Mean gene readcounts and variance and their log2 transformed values were computed.
+Zeros were excluded.
+Everything was collected in a base table **stats**.
+Infinite and NA values -- which arise mainly from genes without any non-zero count or from genes with too few non-zero counts -- were excluded.
+
+```{r}
+Hist(allStats$aveExp, ld = TRUE, main = "Gene Average Expression")
+Dens(allStats$aveExp, allStats$batch, "average expression", "batch", ld = TRUE, main = "Genewise Average Expression")
+Dens(allStats$aveExp, allStats$group, "average expression", "group", ld = TRUE, main = "Genewise Average Expression")
+```
+
+
+## Variance
+
+Genewise variances were computed while excluding zero counts as well.
+
+```{r}
+Hist(allStats$vars, ld = TRUE, main = "Gene Variance")
+Dens(allStats$vars, allStats$batch, "variance", "batch", ld = TRUE, main = "Genewise Variance")
+Dens(allStats$vars, allStats$group, "variance", "group", ld = TRUE, main = "Genewise Variance")
+```
+
+The variance is known to be non-linearly dependent on average expression.
+
+```{r}
+ScatterDensity(allStats$aveExp, allStats$vars, "average expression", "variance", ld = "xy", title = "Genewise Var over aveExp")
+```
+
+
+
+
+## Genewise Poisson-Beta Distributions
+
+According to [Trung Nghia Vu et al](https://academic.oup.com/bioinformatics/article-abstract/32/14/2128/2288270/Beta-Poisson-model-for-single-cell-RNA-seq-data?redirectedFrom=fulltext)
+scRNA-seq gene count distributions follow a Poisson-Beta mixture.
+
+```{r}
+Hist(allData$count[allData$count > 0], "non-zero counts", ld = TRUE, main = "Non-zero Counts")
+```
+
+This distribution has parameters $k$, $\alpha$, $\beta$.
+For each gene all 3 parameters were estimated using the first 3 moments of this function.
+Zero counts were excluded.
+For some genes this estimation method did not work at all (e.g. negative parameter values were estimated).
+These were excluded.
+
+### Parameter k
+
+Distributions of the parameter showed a log-normal distribution.
+
+```{r}
+Dens(allPB$k, allPB$batch, "k", "batch", "Distribution of k", ld = TRUE)
+Dens(allPB$k, allPB$group, "k", "group", "Distribution of k", ld = TRUE)
+```
+
+They were fitted with a log-normal distribution (which in turn has parameters $mean$ and $sd$). 
+Outliers of k (5-95% quantile) were excluded.
+
+```{r}
+pb_k <- sapply(mapping$id, function(x) allModels$batch[[x]]$pb_k$estimate)
+2^apply(pb_k, 1, function(x) c(mean_of_parameter = mean(x), var_of_parameter = var(x)))
+```
+
+Below the distributions of the parameter in each batch are simulated according to the fitted log-normal model and displayed together with the actual parameters.
+
+```{r}
+s <- seq(min(log2(allPB$k)), max(log2(allPB$k)), length.out = 1000)
+m <- apply(pb_k, 2, function(x) dnorm(s, x[1], x[2]))
+PlotDistro(
+  log2(allPB$k), 
+  newdata = rep(s, ncol(m)),
+  prediction = c(m),
+  col = rep(batches, each = length(s)),
+  "log2 k", "batch", "Parameter Distributions of k"
+)
+```
+
+
+### Parameter a
+
+Distributions of the parameter showed a log-normal distribution.
+
+```{r}
+Dens(allPB$a, allPB$batch, "a", "batch", "Distribution of a", ld = TRUE)
+Dens(allPB$a, allPB$group, "a", "group", "Distribution of a", ld = TRUE)
+```
+
+They were fitted with a log-normal distribution (which in turn has parameters $mean$ and $sd$). 
+Outliers of a (5-95% quantile) were excluded.
+
+```{r}
+pb_a <- sapply(mapping$id, function(x) allModels$batch[[x]]$pb_a$estimate)
+2^apply(pb_a, 1, function(x) c(mean_of_parameter = mean(x), var_of_parameter = var(x)))
+```
+
+Below the distributions of the parameter in each batch are simulated according to the fitted log-normal model and displayed together with the actual parameters.
+
+```{r}
+s <- seq(min(log2(allPB$a)), max(log2(allPB$a)), length.out = 1000)
+m <- apply(pb_a, 2, function(x) dnorm(s, x[1], x[2]))
+PlotDistro(
+  log2(allPB$a), 
+  newdata = rep(s, ncol(m)),
+  prediction = c(m),
+  col = rep(batches, each = length(s)),
+  "log2 a", "batch", "Parameter Distributions of a"
+)
+```
+
+
+### Parameter b
+
+Distributions of the parameter showed a log-normal distribution.
+
+```{r}
+Dens(allPB$b, allPB$batch, "b", "batch", "Distribution of b", ld = TRUE)
+Dens(allPB$b, allPB$group, "b", "group", "Distribution of b", ld = TRUE)
+```
+
+They were fitted with a log-normal distribution (which in turn has parameters $mean$ and $sd$). 
+Outliers of a (5-95% quantile) were excluded.
+
+```{r}
+pb_b <- sapply(mapping$id, function(x) allModels$batch[[x]]$pb_b$estimate)
+2^apply(pb_b, 1, function(x) c(mean_of_parameter = mean(x), var_of_parameter = var(x)))
+```
+
+Below the distributions of the parameter in each batch are simulated according to the fitted log-normal model and displayed together with the actual parameters.
+
+```{r}
+s <- seq(min(log2(allPB$b)), max(log2(allPB$b)), length.out = 1000)
+m <- apply(pb_b, 2, function(x) dnorm(s, x[1], x[2]))
+PlotDistro(
+  log2(allPB$b), 
+  newdata = rep(s, ncol(m)),
+  prediction = c(m),
+  col = rep(batches, each = length(s)),
+  "log2 b", "batch", "Parameter Distributions of b"
+)
+```
+
+
+
+## Zeros
+
+The genewise proportion of zeros were calculated.
+
+```{r}
+Dens(allStats$propZeros, allStats$batch, "proprtion of zeros", "batch", main = "Genewise Porportions of 0's")
+Dens(allStats$propZeros, allStats$group, "proprtion of zeros", "group", main = "Genewise Porportions of 0's")
+```
+
+They showed a dependency to the average readcount.
+
+```{r}
+ScatterDensity(allStats$aveExp, allStats$propZeros, "average expression", "proportion of zeros", ld = "x",
+               title = "Genewise Proportion of 0's over Average Expression")
+```
+
+### Zero Proportion Models
+
+The dependence of the proportion of zero counts to average expression is said to follow a Hill equation.
+The Hill equation in this case is defined as
+$P(zero) = 1 - x^n / (K_m + x^n)$
+with parameters $K_m$ and $n$, where $x$ is the average expression
+A Hill equation was fitted in each batch using non-linear least squares.
+To make the model more robust outliers were excluded (5-95% quantile).
+The fitted paramers for all batches are shown below.
+
+```{r}
+zeros <- sapply(mapping$id, function(x) allModels$batch[[x]]$zeros$m$getPars())
+apply(zeros, 1, function(x) c(mean_of_parameter = mean(x), var_of_parameter = var(x)))
+```
+
+Below the proportion of zeros in dependence to average expression is simulated with the fitted parameters of both batches
+and shows together with the real data.
+
+```{r}
+s <- seq(min(allStats$ld_aveExp), max(allStats$ld_aveExp), length.out = 1000)
+l <- lapply(mapping$id, function(x){
+  predict(allModels$batch[[x]]$zeros, newdata = list(a = 2^s))
+})
+PlotPredictMult(
+  allStats$ld_aveExp, 
+  allStats$propZeros,
+  newdata = rep(s, length(l)),
+  prediction = unlist(l),
+  col = rep(batches, each = length(s)),
+  "log2 average expression", "proportion of zeros", "batch",
+  "Proportion of Zeros over Average Expression"
+)
+```
+
+
+## Normality
+
+Gene readcount distributions are said to be roughly normal distributed on a log2 scale.
+Normality was tested with Shapiro Wilks while zero counts were excluded.
+P values were FDR adjusted (FDR<5%).
+
+```{r}
+prop.table(table(allStats$norm)) * 100
+Barplot(allStats$norm, allStats$batch, "normal distribution", "batch", "Normality in Genwise Count Distributions")
+```
+
+Log normal distribution is said to be true rather for high average expression.
+
+```{r}
+Dens(allStats$aveExp, allStats$norm, "average expression", "normal distribution", ld = TRUE, 
+     main = "Genewise Normal Distributions and Average Expression")
+```
+
+
+## Modes
+
+The number of modes in the distributions of genewise log2 counts were estimated.
+Zero counts were excluded for this.
+A density was estimated for each distribution using a Gauss kernel and a pre-set bandwidth.
+For this estimation 512 seeds were set across the distribution.
+Local maxima in for these seeds were counted as modes.
+
+A problem is, that the log2 scale creates a gap between 0 and 1.
+The bandwidth was set to 0.5 so that this gap would not be identified as 2 modes.
+With a bandwith of 0.5 2 maxima would have to be more than 1 tick away on the log2 scale (at least double in count).
+
+```{r}
+prop.table(table(allStats$modes)) * 100
+Barplot(as.character(allStats$modes), allStats$batch, "modes", "batch", "Modes in Genwise Count Distributions")
+Barplot(as.character(allStats$modes), allStats$group, "modes", "group", "Modes in Genwise Count Distributions")
+```
+
+Modes are compared to the average expression.
+Zeros were excluded during average expression calculation.
+
+```{r}
+Dens(allStats$aveExp, allStats$modes == 1, "average expression", "unimodal distribution", ld = TRUE,
+     main = "Unimodal Distribution over Average Expression")
+```
+
+These are average expression distributions for unimodal gene distributions.
+
+```{r}
+Dens(allStats[modes == 1, aveExp], allStats[modes == 1, batch], "average expression", "batch", ld = TRUE,
+     main = "Average Expression Distributions for Unimodal Gene Distributions")
+Dens(allStats[modes == 1, aveExp], allStats[modes == 1, group], "average expression", "group", ld = TRUE,
+     main = "Average Expression Distributions for Unimodal Gene Distributions")
+```
+
+These are average expression distributions for multimodal gene distributions.
+
+```{r}
+Dens(allStats[modes > 1, aveExp], allStats[modes > 1, batch], "average expression", "batch", ld = TRUE,
+     main = "Average Expression Distributions for Multimodal Gene Distributions")
+Dens(allStats[modes > 1, aveExp], allStats[modes > 1, group], "average expression", "group", ld = TRUE,
+     main = "Average Expression Distributions for Multimodal Gene Distributions")
+```
+
+
+### Normality and Unimodality
+
+Here, the correlation between the number modes and normal distribution is shown.
+
+```{r}
+(tab <- table(allStats[, .(modes, norm)]))
+mosaic(tab, shade = TRUE, legend = TRUE)
+```
+
+
+
+
+## Multimodal Distributions
+
+What follows are statistics about multimodal distributions only.
+
+```{r}
+table(allStats$modes > 1)
+prop.table(table(allStats$modes > 1)) * 100
+```
+
+Variances between the x and y coordinates of estimated densities of these distributions were calculated.
+X variance describes the variance of the modes' position on log2 count.
+Y variance describes the variance in density between modes.
+
+### X Variances in Multimodal Distributions
+
+For a multimodal distribution this is the variance of x positions of modes -- the variance of log2 count of modes.
+The distribution of these variances is shown and their dependency to average gene expression are shown.
+
+```{r}
+Dens(allMultis$xVar, allMultis$batch, "x variance", "batch",
+     main = "Distribution of X Var of Modes")
+Dens(allMultis$xVar, allMultis$group, "x variance", "group",
+     main = "Distribution of X Var of Modes")
+ScatterDensity(allMultis$aveExp, allMultis$xVar, "average expression", "x var of modes", ld = "x",
+               title = "X Var of Modes over Average Expression")
+```
+
+### Y Variances in Multimodal Distributions
+
+For a multimodal distribution this is the variance of y density positions of modes -- the variance of the proprtional number of counts.
+The distribution of these variances is shown and their dependency to average gene expression are shown.
+
+```{r}
+Dens(allMultis$yVar, allMultis$batch, "y variance", "batch", main = "Y Var of Modes")
+Dens(allMultis$yVar, allMultis$group, "y variance", "group", main = "Y Var of Modes")
+ScatterDensity(allMultis$aveExp, allMultis$yVar, "average expression", "y var of modes", ld = "x",
+               title = "Y Var of Modes over Average Expression")
+```
+
+
+
+## Average Gene Expression Correlation
+
+Expression correlation between groups is estimated with the Pearson Correlation Coefficient of log2 of average readcount per gene.
+Batches are aggregated using the mean.
+
+```{r}
+m <- dcast(allStats, gene ~ group, value.var = "ld_aveExp", fun.aggregate = mean)
+m <- na.omit(m)
+groupXgroup_avExp <- cor(m[, -1])
+pairs(formula(paste("~", names(m)[-1], collapse = "+")), data = m, 
+      lower.panel = panel.smooth, upper.panel = panel.cor, pch = 20, main = "Group Readcount Correlation")
+```
+
+
+## Normality Correlation
+
+Normality of a gene readcount distribution was tested with a Shapiro Wilks test (FDR adjusted, FDR<0.05).
+The co-occurrence of normality per gene is compared among groups.
+Batches are aggregated by majority decision.
+
+```{r}
+m <- dcast(allStats, gene ~ group, value.var = "norm", fun.aggregate = function(x) round(mean(x)))
+m <- na.omit(m)
+tab <- table(m[, -1])
+norms <- tab
+mosaic(tab, shade = TRUE, legend = TRUE, main = "Group Normality Correlation")
+for( i in 2:(ncol(m) - 1) ){
+  for( k in (i + 1):ncol(m) ){
+    print(tab <- table(m[, c(i, k), with = FALSE]))
+    mosaic(tab, shade = TRUE, legend = TRUE, 
+           main = sprintf("%s vs %s Normality Correlation", names(m)[i], names(m)[k]))
+  }
+}
+```
+
+## Mode Correlation
+
+Correlation in the number of modes for each gene are compared among groups.
+Batches are aggregated by majority decision.
+
+```{r}
+m <- dcast(allStats, gene ~ group, value.var = "modes", fun.aggregate = function(x) round(mean(x)))
+m <- na.omit(m)
+tab <- table(m[, -1])
+modes <- tab
+mosaic(tab, shade = TRUE, legend = TRUE, main = "Group Mode Correlation")
+for( i in 2:(ncol(m) - 1) ){
+  for( k in (i + 1):ncol(m) ){
+    print(tab <- table(m[, c(i, k), with = FALSE]))
+    mosaic(tab, shade = TRUE, legend = TRUE,
+           main = sprintf("%s vs %s Mode Correlation", names(m)[i], names(m)[k]))
+  }
+}
+```
+
+
+
+## Summary Calculations
+
+For fitted parameters, the mean is the *overall estimate*.
+The mean of sd of the parameter within each batch is the *within batch* sd.
+The mean of sd of the parameter within groups is the *between batches* sd.
+The sd of means of the parameter between groups is the *between group* sd.
+
+```{r}
+calc_mean_var <- function(x) c(mean_of_parameter = mean(x), sd_of_parameter = sd(x))
+get_param <- function(x, param) apply(x[[param]], 1, calc_mean_var)
+
+m <- do.call(cbind, lapply(allModels$group, get_param, param = "pb_k"))
+means <- m[, colnames(m) == "mean"]
+sds <- m[, colnames(m) == "sd"]
+pb_k_grp <- list(mean = apply(means, 1, mean), mean_sd = apply(means, 1, sd), sd = apply(sds, 1, mean))
+
+#pb_k_grp$mean[1] # overall estimate
+#pb_k_grp$sd[1] # within batch sd
+#pb_k_grp$mean[2] # between batches sd
+#pb_k_grp$mean_sd[1] # between groups sd
+
+m <- do.call(cbind, lapply(allModels$group, get_param, param = "pb_a"))
+means <- m[, colnames(m) == "mean"]
+sds <- m[, colnames(m) == "sd"]
+pb_a_grp <- list(mean = apply(means, 1, mean), mean_sd = apply(means, 1, sd), sd = apply(sds, 1, mean))
+
+m <- do.call(cbind, lapply(allModels$group, get_param, param = "pb_b"))
+means <- m[, colnames(m) == "mean"]
+sds <- m[, colnames(m) == "sd"]
+pb_b_grp <- list(mean = apply(means, 1, mean), mean_sd = apply(means, 1, sd), sd = apply(sds, 1, mean))
+
+m <- do.call(cbind, lapply(allModels$group, get_param, param = "zeros"))
+Kms <- m[, colnames(m) == "Km"]
+ns <- m[, colnames(m) == "n"]
+zeros_grp <- list(Km = apply(Kms, 1, mean), Km_sd = apply(Kms, 1, sd), n = apply(ns, 1, mean), n_sd = apply(ns, 1, sd))
+
+#zeros_grp$Km[1] # overall estimate
+#zeros_grp$Km[2] # between batch sd
+#zeros_grp$Km_sd[1] # between groups sd
+```
+
+The variance of $K_m$ and $n$ of the zero model cannot easily be calculated.
+I therefore approximate that within the range of 0 and 1 error is normally distributed around the fitted Hill equation.
+The sd of this error can be estimated using the residuals.
+
+```{r}
+zeros_sd <- mean(sapply(allModels$batch, function(x) sqrt(mean(x$zero$m$resid()^2))))
+```
+
+The variance in cell number among batches and groups.
+
+```{r}
+smpls_btch <- table(as.character(smpls$batch))
+smpls_btch_sd <- mean(sapply(groups, function(x) sd(smpls_btch[mapping[group == x, id]])))
+smpls_grp_sd <- sd(sapply(groups, function(x) mean(smpls_btch[mapping[group == x, id]])))
+```
+
+Furthermore some generic values.
+
+```{r}
+cells <- dim(sce)[2]
+feats <- dim(sce)[1]
+total_count <- sum(allData$count)
+total_zero <- sum(allData$count == 0)
+total_median <- median(allData[count > 0, count])
+total_mean <- mean(allData[count > 0, count])
+total_card <- length(unique(allData$count))
+```
+
+
+
+# Summary
+
+```{r, echo=FALSE}
+knitr::opts_chunk$set(echo = FALSE)
+options(digits = 4)
+```
+
+* dataset has **`r format(feats, big.mark = " ")`** features and **`r format(cells, big.mark = " ")`** cells
+* the total count is **`r format(total_count, big.mark = " ")`**
+    + that's **`r format(total_count / cells, big.mark = " ")`** counts per cell
+    + and **`r format(total_count / cells / feats, big.mark = " ")`** counts per cell per feature
+* there are **`r mean(smpls_btch)`** cells per batch with sd of `r smpls_btch_sd`(`r smpls_btch_sd / mean(smpls_btch) * 100`%) cells within groups and sd of `r smpls_grp_sd`(`r smpls_grp_sd / mean(smpls_btch) * 100`%) cells between groups
+* average library size is **`r format(mean(libs$size), big.mark = " ")`** with sd `r format(sd(libs$size), big.mark = " ")`(`r sd(libs$size) / mean(libs$size)* 100`%)
+* total 0 count is **`r format(total_zero, big.mark = " ")`**, that's **`r total_zero / nrow(allData) * 100`**%
+* there are **`r length(groups)`** groups with **`r length(batches) / length(groups)`** batches per group
+* the readcount table has a median of **`r format(total_median, big.mark = " ")`** and a mean of **`r format(total_mean, big.mark = " ")`** (0's excluded)
+    + Delta(mean, median) is **`r total_mean - total_median`** (`r (total_mean - total_median) / total_mean * 100`% of mean)
+    + Cardinality is **`r format(total_card, big.mark = " ")`** (`r total_card / nrow(allData) * 100`% of possible cardinality)
+    + Variance is **`r format(var(allData[count > 0, count]), big.mark = " ")`**, CV is **`r format(var(allData[count > 0, count]) / total_mean, big.mark = " ")`**
+    + Median Absolute Deviation is **`r mad(allData[count > 0, count])`** (`r mad(allData[count > 0, count]) / total_mean * 100`% of mean)
+* in all batches **`r round(prop.table(table(allStats[, norm]))[2] * 100)`%** genwise readcounts (excluding 0's) show normal distribution
+* and **`r round(prop.table(table(allStats[, modes > 1]))[2] * 100)`%** show more than 1 mode
+
+**Gene Distributions**
+
+According to [Trung Nghia Vu et al](https://academic.oup.com/bioinformatics/article-abstract/32/14/2128/2288270/Beta-Poisson-model-for-single-cell-RNA-seq-data?redirectedFrom=fulltext)
+scRNA-seq gene count distributions follow a Poisson-Beta mixture with parameters $k$, $\alpha$, $\beta$.
+The distributions have an expected mean of $\mu = k * \alpha / (\alpha + \beta)$,
+and expected vairance of $\sigma^2 = k^2 * \alpha * \beta / ((\alpha + \beta + 1) * (\alpha + \beta)^2)$.
+The Poisson-Beta mixture was fitted on count data. 
+Their parameter distributions were fitted to log-normal distributions.
+The estimates below describe the parameter estimated on a log2-transformed data.
+
+| parameter | overall estimate | within batch sd  | between batch sd | between group sd |
+|:--------- |:---------------- |:---------------------- |:---------------------- |:---------------------- |
+| $k$       | `r pb_k_grp$mean[1]`| `r pb_k_grp$sd[1]`(`r pb_k_grp$sd[1] / pb_k_grp$mean[1] * 100`%)    | `r pb_k_grp$mean[2]`(`r pb_k_grp$mean[2] / pb_k_grp$mean[1] * 100`%)      | `r pb_k_grp$mean_sd[1]`(`r pb_k_grp$mean_sd[1] / pb_k_grp$mean[1] * 100`%) |
+| $\alpha$  | `r pb_a_grp$mean[1]`| `r pb_a_grp$sd[1]`(`r pb_a_grp$sd[1] / pb_a_grp$mean[1] * 100`%)    | `r pb_a_grp$mean[2]`(`r pb_a_grp$mean[2] / pb_a_grp$mean[1] * 100`%)      | `r pb_a_grp$mean_sd[1]`(`r pb_a_grp$mean_sd[1] / pb_a_grp$mean[1] * 100`%) |
+| $\beta$   | `r pb_b_grp$mean[1]`| `r pb_b_grp$sd[1]`(`r pb_b_grp$sd[1] / pb_b_grp$mean[1] * 100`%)    | `r pb_b_grp$mean[2]`(`r pb_b_grp$mean[2] / pb_b_grp$mean[1] * 100`%)      | `r pb_b_grp$mean_sd[1]`(`r pb_b_grp$mean_sd[1] / pb_b_grp$mean[1] * 100`%) |
+
+
+**Zero Counts**
+
+The dependence of the proportion of 0's to average expression is said to follow a Hill equation.
+The Hill equation in this case is defined as
+$P(zero) = 1 - x^n / (K_m + x^n)$
+with parameters $K_m$ and $n$, where $x$ is the average expression
+A Hill equation was fitted in each batch using non-linear least squares.
+The fitted paramers for all batches are shown below.
+
+| parameter | overall estimate | between batch sd | between group sd |
+|:--------- |:---------------- |:---------------------- |:---------------------- |
+| $K_m$     | `r zeros_grp$Km[1]` | `r format(zeros_grp$Km[2], big.mark = " ")`(`r zeros_grp$Km[2] / zeros_grp$Km[1] * 100`%) | `r format(zeros_grp$Km_sd[1], big.mark = " ")`(`r zeros_grp$Km_sd[1] / zeros_grp$Km[1] * 100`%) |
+| $n$       | `r zeros_grp$n[1]` | `r format(zeros_grp$n[2], big.mark = " ")`(`r zeros_grp$n[2] / zeros_grp$n[1] * 100`%) | `r format(zeros_grp$n_sd[1], big.mark = " ")`(`r zeros_grp$n_sd[1] / zeros_grp$n[1] * 100`%) |
+
+Within the range of 0 and 1 (for $P(zero)$) the mean sd around the fitted Hill equation was **`r zeros_sd`**.
+
+
+
+```{r, echo=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+options(digits = 2)
+```
+
+
+

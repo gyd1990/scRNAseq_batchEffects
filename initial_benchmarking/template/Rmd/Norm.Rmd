@@ -1,0 +1,141 @@
+# (PART) Normalization {-}
+
+
+
+# Library Size
+
+The simulation did not create significantly differing library sizes.
+A library size normalization is therefore not necessary.
+However, there are many zeros in the dataset which would be removed by 
+a library size normalization such as the method by
+[Lun et al](https://genomebiology.biomedcentral.com/articles/10.1186/s13059-016-0947-7).
+
+Here, cell pools are created within which expression is 
+summed creating pool-based size factors. 
+These can be deconvoluted back into cell-based size factors.
+Size factors are calculated using the median, which assumes at least 50% of 
+genes are not differentially expressed between cells within a pool.
+Robustness to this assumption is provided by always pooling 
+cells with similar library sizes.
+Further robustness to heterogenic cells can be provided by first 
+clustering cell by correlation.
+
+```{r}
+# correl cluster
+minClust <- if (ncol(sce) > 800) 200 else 60
+clust <- quickCluster(sce, min.size = minClust)
+# grp cluster
+#clust <- pData(sce)[[grpID]]
+if (min(table(clust)) > 200) {
+  poolSizes <- c(20, 40, 60, 80, 100)
+} else {
+  poolSizes <- c(10, 20, 30)
+}
+sce <- computeSumFactors(sce, sizes = poolSizes, clusters = clust)
+```
+
+Finally, counts are normalized using cell-wise size factors.
+In the same step they are log2 transformed to 
+provide some variance stabilization (+1 to avoid zeros).
+
+```{r}
+sce <- scater::normalize(sce)
+```
+
+## Visualization
+
+This is the data after library size normalization using `scran`.
+
+```{r}
+scater::plotPCA(sce, colour_by = btchID, shape_by = grpID, 
+                exprs_values = "exprs", ncomponents = 3)
+plotDiffusionMap(sce, colour_by = btchID, shape_by = grpID, 
+                 exprs_values = "exprs", ncomponents = 3)
+cellDist(sce) <- as.matrix(dist(t(exprs(sce)))) # euclid
+scater::plotMDS(sce, colour_by = btchID, shape_by = grpID, ncomponents = 3)
+```
+
+
+
+
+
+
+
+# Batch Effects
+
+The influence of the different batches on normalized counts can be seen below.
+
+```{r}
+plotQC(sce, type = "find", variable = "batch", exprs_values = "exprs")
+```
+
+They can be removed by fitting a linear mixed model for each gene as 
+proposed by [Tung et al](http://www.nature.com/articles/srep39921).
+A fixed effect describes biological groups, a random effect describes batches.
+One important assumption of this model is, that the random effect of batches 
+is independent of the biological group.
+We use functions from the limma package for this.
+
+```{r}
+library(limma)
+source("R/ruv_mixed_model.R")
+```
+
+In `ruv_mixed_model` 
+Chiaowen Joyce Hsiao (https://github.com/jhsiao999) adjusted the 
+`gls.series` function so that it returns the residuals.
+
+```{r}
+block <- pData(sce)[[btchID]]
+design <- model.matrix(~ 1 + pData(sce)[[grpID]])
+dup_corrs <- duplicateCorrelation(exprs(sce), design = design, block = block)
+gls_fit <- ruv_mixed_model(
+  exprs(sce), 
+  ndups = 1, 
+  design = design, 
+  block = block, 
+  correlation = dup_corrs$cons
+)
+```
+
+With the residuals, the normalized counts can be corrected.
+
+```{r}
+m <- t(design %*% t(gls_fit$coef)) + gls_fit$resid
+dimnames(m) <- list(featureNames(sce), sampleNames(sce))
+norm_exprs(sce) <- m
+```
+
+Below you can see how variability caused by batches was reduced.
+
+```{r}
+plotQC(sce, type = "find", variable = "batch", exprs_values = "norm_exprs")
+```
+
+## Visualization
+
+Here is a look at the cleaned, normalized count table after
+variability caused by batches was removed.
+
+```{r}
+scater::plotPCA(sce, colour_by = btchID, shape_by = grpID, 
+                exprs_values = "norm_exprs", ncomponents = 3)
+plotDiffusionMap(sce, colour_by = btchID, shape_by = grpID, 
+                 exprs_values = "norm_exprs", ncomponents = 3)
+cellDist(sce) <- as.matrix(dist(t(norm_exprs(sce)))) # euclid
+scater::plotMDS(sce, colour_by = btchID, shape_by = grpID, ncomponents = 3)
+```
+
+
+# Final Save
+
+Save objects.
+
+```{r}
+saveRDS(sce, "intermediate_data/normed.rds")
+```
+
+
+
+
+***

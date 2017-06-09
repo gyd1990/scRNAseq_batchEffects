@@ -1,0 +1,399 @@
+```{r, echo=FALSE, results='asis'}
+cat("# Batch", as.character(batches[btchCount]))
+```
+
+## Init
+
+`allData` is subsetted for this batch.
+One element for this batch is added to all lists.
+
+```{r}
+data <- allData[batch == batches[btchCount]]
+allModels$batch[[btchCount]] <- list()
+allCors$batch[[btchCount]] <- list()
+```
+
+
+## Average Gene Expression
+
+Mean gene readcounts and variance and their log2 transformed values are computed.
+Zeros are excluded.
+Everything is collected in a base table **stats**.
+Infinite and NA values -- which arise mainly from genes without any non-zero count or from genes with too few non-zero counts -- are excluded.
+To be consistent these genes will always be excluded in considerations of this batch.
+
+```{r}
+dt <- data[, .(mean = mean(count[count > 0]), var = var(count[count > 0])), by = gene]
+aveExp <- dt$mean
+ld_aveExp <- log2(aveExp)
+vars <- dt$var
+ld_vars <- log2(vars)
+doNotUse <- is.na(ld_aveExp) | is.infinite(ld_aveExp)  | is.na(ld_vars) | is.infinite(ld_vars)
+prop.table(table(doNotUse)) * 100
+stats <- data.table(
+  gene = dt$gene,
+  batch = batches[btchCount],
+  group = pData(sce)[[grpID]][which(pData(sce)[[btchID]] == batches[btchCount])[1]],
+  aveExp = aveExp,
+  ld_aveExp = ld_aveExp,
+  vars = vars,
+  ld_vars = ld_vars
+)
+stats <- stats[!doNotUse, ]
+Hist(stats$aveExp, ld = TRUE, main = "Gene Average Expression")
+```
+
+
+## Genewise Variance
+
+In the step above the genewise variances were computed.
+
+```{r}
+Hist(stats$vars, ld = TRUE, main = "Gene Variance")
+```
+
+The variance is known to be non-linearly dependent on average expression.
+
+```{r}
+ScatterDensity(stats$aveExp, stats$vars, "average expression", "variance", ld = "xy", title = "Genewise Var over aveExp")
+```
+
+
+## Genewise Poisson-Beta Distributions
+
+According to [Trung Nghia Vu et al](https://academic.oup.com/bioinformatics/article-abstract/32/14/2128/2288270/Beta-Poisson-model-for-single-cell-RNA-seq-data?redirectedFrom=fulltext)
+scRNA-seq gene count distributions follow a Poisson-Beta mixture.
+
+```{r}
+Hist(data$count[data$count > 0], "non-zero counts", ld = TRUE, main = "Non-zero Counts")
+```
+
+This distribution has parameters $k$, $\alpha$, $\beta$.
+For each gene all 3 parameters are estimated using the first 3 moments of this function.
+Zero counts are excluded.
+For some genes this estimation method does not work at all (e.g. negative parameter values are estimated).
+These are excluded.
+
+```{r}
+pb <- stats
+pb$k <- numeric()
+pb$a <- numeric()
+pb$b <- numeric()
+for( i in 1:nrow(pb) ){
+  pb[i, c("k", "a", "b") := PoiBetaMMFit(data[gene == pb$gene[i] & count > 0, count]) ]
+}
+pb <- pb[k > 0 & a > 0 & b > 0, ]
+```
+
+### Controls
+
+The distributions have an expected mean of $\mu = k * \alpha / (\alpha + \beta)$,
+and expected vairance of $\sigma^2 = k^2 * \alpha * \beta / ((\alpha + \beta + 1) * (\alpha + \beta)^2)$.
+Even though they were fitted using variance and mean, the following plots control whether fitted variance and mean are similar to the real data.
+
+```{r}
+fitted <- data.table(
+  means = pb$k * pb$a / (pb$a + pb$b),
+  vars = pb$k^2 * pb$a * pb$b / ((pb$a + pb$b + 1) * (pb$a + pb$b)^2)
+)
+real <- data.table(means = pb$aveExp, vars = pb$vars)
+PlotDistro(real$means, fitted$means, col = "means", xl = "means", leg = "fitted", ld = TRUE,
+           main = "PB fit control")
+PlotDistro(real$vars, fitted$vars, col = "vars", xl = "vars", leg = "fitted", ld = TRUE,
+           main = "PB fit control")
+ScatterDensity(fitted$means, fitted$vars, "fitted mean", "fitted variance", ld = "xy",
+               title = "PB fit control")
+```
+
+### Model for Parameter Distributions
+
+The distribution of all 3 parameters is modelled next.
+
+```{r}
+dt <- data.table(
+  value = c(pb$k, pb$a, pb$b),
+  param = rep(c("k", "a", "b"), each = nrow(pb))
+)
+Dens(dt$value, dt$param, "value", "parameter", ld = TRUE, "Poisson-Beta Parameters")
+```
+
+On the log2 scale all parameters seem to be more or less normally distributed.
+**Normal** distributions are fitted.
+To make the fit more robust, extreme values are excluded.
+**k**:
+
+```{r}
+Ks <- pb[k < quantile(pb$k, 0.95) & k > quantile(pb$k, 0.05), k]
+fitK <- fitdist(log2(Ks), "norm")
+allModels$batch[[btchCount]]$pb_k <- fitK
+summary(fitK)
+plot(fitK)
+s <- seq(min(log2(pb$k)), max(log2(pb$k)), length.out = 1000)
+PlotDistro(
+  log2(pb$k), 
+  newdata = s,
+  prediction = dnorm(s, fitK$estimate[1], fitK$estimate[2]),
+  "Gauss", "log2 k", "fitted", 
+  main = "Parameter Distribution of k"
+)
+```
+
+**a**:
+
+```{r}
+As <- pb[a < quantile(pb$a, 0.95) & a > quantile(pb$a, 0.05), a]
+fitA <- fitdist(log2(As), "norm")
+allModels$batch[[btchCount]]$pb_a <- fitA
+summary(fitA)
+plot(fitA)
+s <- seq(min(log2(pb$a)), max(log2(pb$a)), length.out = 1000)
+PlotDistro(
+  log2(pb$a), 
+  newdata = s,
+  prediction = dnorm(s, fitA$estimate[1], fitA$estimate[2]),
+  "Gauss", "a", "fitted", 
+  main = "Parameter Distribution of a"
+)
+```
+
+**b**:
+
+```{r}
+Bs <- pb[b < quantile(pb$b, 0.95) & b > quantile(pb$b, 0.05), b]
+fitB <- fitdist(log2(Bs), "norm")
+allModels$batch[[btchCount]]$pb_b <- fitB
+summary(fitB)
+plot(fitB)
+s <- seq(min(log2(pb$b)), max(log2(pb$b)), length.out = 1000)
+PlotDistro(
+  log2(pb$b), 
+  newdata = s,
+  prediction = dnorm(s, fitB$estimate[1], fitB$estimate[2]),
+  "Gauss", "b", "fitted", 
+  main = "Parameter Distribution of b"
+)
+```
+
+
+## Zeros
+
+The genewise proportion of zeros is calculated.
+
+```{r}
+propZeros <- data[, .(z = sum(count == 0) / length(count)), by = gene]$z
+propZeros <- propZeros[!doNotUse]
+summary(propZeros)
+stats$propZeros <- propZeros
+Hist(stats$propZeros, "proportion of zeros")
+```
+
+Proportion of zero counts per gene is known to be dependent on average expression.
+Zeros were excluded in gene average expression calculation.
+
+```{r}
+ScatterDensity(stats$aveExp, stats$propZeros, "average expression", "proportion of zeros", ld = "x",
+               title = "Genewise Proportion of 0's over Average Expression")
+```
+
+### Model Zero Proportions
+
+The dependence of the proportion of zero counts to average expression is said to follow a Hill equation.
+The Hill equation in this case is defined as
+$P(zero) = 1 - x^n / (K_m + x^n)$
+with parameters $K_m$ and $n$, where $x$ is the average expression.
+A Hill equation is fitted using non-linear least squares.
+To make the model more robust outliers are excluded.
+
+```{r}
+dt <- stats[, .(z = propZeros, a = aveExp)]
+dt <- dt[a > quantile(a, 0.05) & a < quantile(a, 0.95), ]
+fit <- nls(
+  z ~ 1 - a^n / (Km + a^n), 
+  data = dt, 
+  start = list(Km = median(dt$a), n = 1.5),
+  control = list(maxiter = 100, warnOnly = TRUE)
+)
+allModels$batch[[btchCount]]$zeros <- fit
+summary(fit)
+PlotNLS(fit, dt$z)
+s <- seq(min(stats$ld_aveExp), max(stats$ld_aveExp), length.out = 1000)
+PlotPredict(
+  stats$ld_aveExp, stats$propZeros,
+  newdata = s,
+  prediction = predict(fit, newdata = list(a = 2^s)),
+  "log2 average expression", "proportion of zeros",
+  "Proportion of 0's over Average Expression Model"
+)
+```
+
+
+
+
+
+## Normality
+
+Gene readcount distributions are said to be roughly normal distributed on a log2 scale.
+Normality is tested with Shapiro Wilks while zero counts are excluded.
+P values are FDR adjusted.
+
+```{r}
+test <- function(x){
+  x <- log2(x[x > 0])
+  if( length(x) < 3 || length(unique(x)) < 2 ) return(1)
+  shapiro.test(x)$p.value
+}
+norms <- data[, .(norm = test(count)), by = gene]$norm
+norms <- norms[!doNotUse]
+norms <- p.adjust(norms, method = "fdr")
+norms <- norms < 0.05
+stats$norm <- norms
+prop.table(table(norms)) * 100
+```
+
+Log normal distribution is said to be true rather for high average expression.
+
+```{r}
+Dens(stats$aveExp, stats$norm, "average expression", "normal distribution", ld = TRUE, 
+     main = "Genewise Normal Distributions and Average Expression")
+```
+
+
+
+
+## Modes
+
+The number of modes in the distributions of genewise log2 counts are estimated.
+Zero counts are excluded for this.
+A density is estimated for each distribution using a Gauss kernel and a pre-set bandwidth.
+For this estimation 512 seeds are set across the distribution.
+Local maxima in for these seeds are counted as modes.
+
+A problem is, that the log2 scale creates a gap between 0 and 1.
+The bandwidth is set to 0.5 so that this gap is not identified as 2 modes.
+With a bandwith of 0.5 2 maxima have to be more than 1 tick away on the log2 scale (at least double in count).
+
+```{r}
+n <- function(x){
+  x <- log2(x[x > 0])
+  ms <- GetModes(x, 0.5)
+  if( is.null(ms) ) 0L else nrow(ms)
+}
+modes <- data[, .(n = n(count)), by = gene]$n
+stats$modes <- modes[!doNotUse]
+prop.table(table(stats$modes)) * 100
+```
+
+Modes are compared to the average expression.
+Zeros were excluded during average expression calculation.
+
+```{r}
+Dens(stats$aveExp, stats$modes == 1, "average expression", "unimodal distribution", ld = TRUE,
+     main = "Unimodal Distribution over Average Expression")
+```
+
+### Normality and Unimodality
+
+Here, the correlation between the number modes and normal distribution is shown.
+
+```{r}
+(tab <- table(stats[, .(modes, norm)]))
+mosaic(tab, shade = TRUE, legend = TRUE)
+```
+
+
+
+
+
+## Multimodal Distributions
+
+What follows are statistics about multimodal distributions only.
+
+```{r}
+table(stats$modes > 1)
+prop.table(table(stats$modes > 1)) * 100
+```
+
+Variances between the x and y coordinates of estimated densities of these distributions are calculated.
+X variance describes the variance of the modes' position on log2 count.
+Y variance describes the variance in density between modes.
+
+```{r}
+multis <- stats[modes > 1]
+xVar <- function(x) {
+  x <- log2(x[x>0])  
+  ms <- GetModes(x, 0.5)
+  var(ms[, 1])
+}
+yVar <- function(x) {
+  x <- log2(x[x>0])  
+  ms <- GetModes(x, 0.5)
+  var(ms[, 2])
+}
+vars <- data[gene %in% multis$gene, .(x = xVar(count), y = yVar(count)), by = gene]
+summary(vars$x)
+summary(vars$y)
+```
+
+These variances are saved in an object for multimodal distributions.
+
+```{r}
+multis$xVar <- vars$x
+multis$yVar <- vars$y
+```
+
+## X Variances in Multimodal Distributions
+
+For a multimodal distribution this is the variance of x positions of modes -- the variance of log2 count of modes.
+The distribution of these variances is shown and their dependency to average gene expression are shown.
+
+```{r}
+Hist(multis$xVar)
+ScatterDensity(multis$aveExp, multis$xVar, "average expression", "x var of modes", ld = "x",
+               title = "X Var of Modes over Average Expression")
+```
+
+## Y Variances in Multimodal Distributions
+
+For a multimodal distribution this is the variance of y density positions of modes -- the variance of the proprtional number of counts.
+The distribution of these variances is shown and their dependency to average gene expression are shown.
+
+```{r}
+Hist(multis$yVar, "y var of modes", main = "Y Var of Modes")
+ScatterDensity(multis$aveExp, multis$yVar, "average expression", "y var of modes", ld = "x",
+               title = "Y Var of Modes over Average Expression")
+```
+
+
+
+
+
+## Readcount Correlation
+
+Correlation of gene expression between samples is estimated with the Pearson Correlation Coefficient of readcounts per gene.
+
+```{r}
+m <- dcast(data, gene ~ sample, value.var = "count")
+m <- na.omit(m)
+cc <- cor(m[, -1])
+allCors$batch[[btchCount]]$cellXcell_counts <- cc
+col <- colorRampPalette(c("blue", "white", "red"))(20)
+heatmap(cc, col = col, symm = TRUE, main = "Sample Readcount Correlation", labRow = FALSE, labCol = FALSE)
+```
+
+
+
+
+
+
+## Finish Batch
+
+Objects are appended, batch counter is incremented.
+
+```{r}
+allStats <- rbindlist(list(allStats, stats))
+allMultis <- rbindlist(list(allMultis, multis))
+allPB <- rbindlist(list(allPB, pb))
+btchCount <- btchCount + 1
+```
+
+

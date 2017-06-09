@@ -1,0 +1,13 @@
+---
+title: "Data Quality Report"
+---
+
+```{r optsSet, echo=FALSE, results="hide"}
+knitr::opts_chunk$set(echo = TRUE, message = FALSE, warning = FALSE , dpi = 400)
+```
+
+```{r, child='QC.Rmd'}
+```
+
+```{r, child='Norm.Rmd'}
+```

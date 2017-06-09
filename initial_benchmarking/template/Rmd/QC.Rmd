@@ -1,0 +1,363 @@
+# (PART) Quality Control {-}
+
+# Pre-Processing
+
+## Parameters
+
+These are parameters used in quality control and library size normalization.
+IDs are used to access feature entries during the analysis.
+The simulated data resembles UMIs which is indicated with *molecules* here.
+
+```{r}
+quantity <- "molecules"
+
+grpID <- "group"
+btchID <- "batch"
+smplID <- "sample"
+```
+
+## Load Data
+
+The simulation created a dataset with 3 tables.
+The **molecules** table contains counted molecules incorporating UMIs.
+The **annotation** table contains phenotypic annotations -- cell annotations.
+The 3rd table contains feature (gene) information. It is used later.
+The following libraries will be used throughout the analysis.
+
+```{r, warning=FALSE, message=FALSE}
+options(digits = 2)
+library(scran)
+library(scater)
+library(ggplot2)
+library(data.table)
+
+ds <- readRDS("data/simulation.rds")
+molecules <- ds$table
+annotation <- ds$pData
+```
+
+## Data Consistency
+
+These are some basic consistency and sanity checks for the data.
+
+```{r}
+dim(molecules)
+molecules[1:5, 1:5]
+any(is.null(molecules) | is.na(molecules))
+summary(as.vector(as.matrix(molecules)))
+plot(table(substr(as.vector(as.matrix(molecules)), 1, 1))[-1])
+```
+
+
+
+## Create SCE Dataset
+
+Phenotypic data is stored in the annotation file.
+This is information about the samples (cells) with batch IDs and group IDs.
+
+```{r}
+pheno_data <- new("AnnotatedDataFrame", annotation)
+rownames(pheno_data) <- pheno_data[[smplID]]
+table(annotation[[grpID]])
+table(annotation[[btchID]])
+```
+
+Feature data (about genes) is created from the provided a 
+3rd table created during simulation.
+
+```{r}
+feature_data <- ds$fData
+feature_data <- new("AnnotatedDataFrame", feature_data)
+rownames(feature_data) <- feature_data$gene
+```
+
+Everything is combined into a single cell expression dataset 
+which is used throuout the analysis.
+
+```{r}
+rownames(molecules) <- rownames(feature_data)
+rownames(pheno_data) <- pheno_data[[smplID]]
+colnames(molecules) <- rownames(pheno_data)
+sce <- newSCESet(
+  countData = molecules,
+  phenoData = pheno_data,
+  featureData = feature_data
+)
+dim(sce)
+```
+
+## Zero Genes
+
+Genes without any count in any cell do not contain information 
+and can savely be removed.
+
+```{r}
+nonzero_genes <- rowSums(counts(sce) > 0) > 0
+table(nonzero_genes)
+dt <- data.table(
+  label = fData(sce)$label, 
+  dropout = !nonzero_genes
+)
+dt[, .(total = sum(dropout), 
+       proportion = sum(dropout) / length(dropout)), by = label]
+sce <- sce[nonzero_genes, ]
+```
+
+## Calculate Quality Control Metrics
+
+Quality control metrics are calculated.
+
+```{r}
+sce <- calculateQCMetrics(sce)
+```
+
+
+
+
+
+
+
+# Cell Filtering
+
+## Manual Cell Filter
+
+### Total Number of Reads per Cell
+
+Cells containing much more or much less reads than all the other cells are 
+likely to be technical artifacts.
+These cells would be removed in a real dataset.
+Therefore, they are removed here as well.
+3 median absolute deviations on a log10 scale around the median 
+are used as thresholds.
+
+```{r}
+MADrange <- function(arr, nmads = 5, log = FALSE) {
+  if(log) arr <- log10(arr)
+  cur.med <- median(arr)
+  cur.mad <- mad(arr, center = cur.med)
+  upper.limit <- cur.med + nmads * cur.mad
+  lower.limit <- cur.med - nmads * cur.mad
+  out <- c(lower.limit, upper.limit)
+  if(log) out <- 10^out
+  return(out)
+}
+(th <- MADrange(sce$total_counts, 3, log = TRUE))
+```
+
+The plot shows the distribution with thresholds in red.
+
+```{r}
+main <- sprintf("Filter by Total Counts with thresholds at %.0f and %.0f", 
+                th[1], th[2])
+ggplot(data.frame(counts = sce$total_counts)) +
+  geom_histogram(aes(x = counts), bins = 30) +
+  geom_vline(xintercept = th, color = "red", linetype = 2) +
+  ggtitle(main) +
+  theme_bw()
+filter_by_total_counts <- colSums(counts(sce)) > th[1] & 
+                          colSums(counts(sce)) < th[2]
+table(filter_by_total_counts)
+```
+
+
+### Total Number of Features Detected per Cell
+
+Cells which have almost no detected genes but a very high count for only a 
+few genes might have passed the first filter.
+This second filter detects cell with only very few genes detected.
+Again, since these cells would be excluded in a real dataset, they are
+excluded here as well.
+3 median absolute deviations below the median is used as threshold.
+
+```{r}
+(th <- MADrange(sce$total_features, 3)[1])
+main <- sprintf("Filter by Total Features with lower Threshold at %.0f", th)
+ggplot(data.frame(counts = sce$total_features)) +
+  geom_histogram(aes(x = counts), bins = 30) +
+  geom_vline(xintercept = th, color = "red", linetype = 2) +
+  ggtitle(main) +
+  theme_bw()
+filter_by_expr_features <- sce$total_features > th
+table(filter_by_expr_features)
+```
+
+### Summary
+
+Now, all manual cell filters are combined.
+The number of cells which are kept by this manual cell filter are shown below.
+
+```{r}
+pData(sce)$filter_cells_manual <- (
+  filter_by_total_counts &
+  filter_by_expr_features 
+)
+table(pData(sce)$filter_cells_manual)
+```
+
+Below, the cells which are kept are further grouped by each batches.
+
+```{r}
+dt <- data.table(
+  group = sce[[grpID]], 
+  batch = sce[[btchID]], 
+  filter = sce$filter_cells_manual
+)
+dt[, .(keep = sum(filter), 
+       proportion = sum(filter) / length(filter)), by = batch]
+```
+
+
+## Scater Default Cell Filter
+
+There is a default cell filter by the scater package.
+It removes cells with 
+* more than 5 MAD (on log10 scale) from median total readcounts
+* more than 5 MAD from median features detected
+
+```{r}
+sce$filter_cells_default <- (
+  !sce$filter_on_total_counts &
+  !sce$filter_on_total_features 
+)
+table(sce$filter_cells_default)
+```
+
+
+## PCA Outlier Detection
+
+The scater package another filter which identifies outliers based on a PCA plot.
+
+
+```{r, message=FALSE, warning=FALSE, include=FALSE}
+sce <- plotPCA(sce, size_by = "total_features", 
+               shape_by = "filter_cells_manual", pca_data_input = "pdata", 
+              detect_outliers = TRUE, return_SCESet = TRUE)
+```
+```{r}
+table(sce$outlier)
+```
+
+
+
+
+## Cell Filter Comparison
+
+These cells are filtered out in this simulation because such cells would be
+filtered out in a real dataset.
+
+```{r}
+sce$filter_cells_final <- sce$filter_cells_manual & 
+                          sce$filter_cells_default & 
+                          !sce$outlier
+table(sce$filter_cells_final)
+sce <- sce[, sce$filter_cells_final]
+```
+
+
+
+
+
+# Gene Filtering
+
+## Gene Expression
+
+The following plot shows the top 50 expressed genes.
+
+```{r}
+scater::plotQC(sce, type = "highest-expression")
+```
+
+## Low Abundance Genes
+
+As for zero genes these genes are problematic in downstream analysis 
+and are filtered out.
+As in a real dataset these genes are filtered out in the simulation as well.
+There are two different methods to identify low abundance genes.
+
+### Mean Expression
+
+Here, low abundance genes are defined as genes with a mean expression 
+of below 1 for readcounts and below 0.01 for UMIs.
+This method only filters out genes which are neither expressed in 
+many cells nor expressed highly in few cells.
+
+```{r}
+aveCounts <- rowMeans(counts(sce))
+filter_on_ave_count <- 
+  aveCounts >= switch(quantity, reads = 1, molecules = 0.01)
+table(filter_on_ave_count)
+```
+
+### Number of Expressing Cells
+
+Another method to identify low abundance genes is by 
+the number of cells in which they are expressed.
+This method is more stringent and will filter out rare cell types.
+A threshold for identifying expression in a single cell and a 
+threshold for the minimum number of expressing cells can be set.
+For UMIs the threshold for expression is usually defined 
+as more than 1 count, for readcounts it is defined as more than 4 counts.
+Here, the minimum expressing cells is 
+set to 1% of all cells (all batches combined).
+
+```{r}
+nCounts <- switch(quantity, reads = 4, molecules = 1)
+nCells <- ceiling(ncol(counts(sce)) * 0.01)
+exprCells <- apply(counts(sce), 1, function(x) sum(x > nCounts))
+filter_on_expr_cells <- exprCells >= nCells
+table(filter_on_expr_cells)
+```
+
+### Mean Expression vs Number of Expressing Cells
+
+The scatter plot below helps identify correlation beween mean expression and
+number of expressing cells for genes.
+
+```{r}
+df <- data.frame(
+  l2aveCount = log2(aveCounts), 
+  exprClls = exprCells
+)
+arr <- densCols(df$exprClls, df$l2aveCount, 
+                colramp = colorRampPalette(c("black", "white")))
+df$dens <- col2rgb(arr)[1, ] + 1L
+cols <-  colorRampPalette(c("#000099", "#00FEFF", "#45FE4F", "#FCFF00", 
+                            "#FF9400", "#FF3100"))(256)
+df$col <- cols[df$dens]
+plot(exprClls ~ l2aveCount, data = df[order(df$dens), ], pch = 20, col = col, 
+     cex = 0.3, bty = "l", main = "Mean Expression and Number of Expressing Cells")
+legend("bottomright", c("high", "low"), fill = c("#FF3100", "#000099"), 
+       border = "white", bty = "n", title = "Density")
+```
+
+
+## Summary
+
+Both filters are used.
+These filters are used on the simulated data because such genes would be 
+filtered out in a real dataset as well.
+
+```{r}
+fData(sce)$filter_genes_final <- filter_on_ave_count & filter_on_expr_cells
+table(fData(sce)$filter_genes_final)
+sce <- sce[fData(sce)$filter_genes_final, ]
+```
+
+
+## Visualization
+
+Here is a look at the cleaned count table.
+
+```{r}
+scater::plotPCA(sce, colour_by = btchID, shape_by = grpID, ncomponents = 3)
+plotDiffusionMap(sce, colour_by = btchID, shape_by = grpID, ncomponents = 3)
+cellDist(sce) <- as.matrix(dist(t(counts(sce)))) # euclid
+plotMDS(sce, colour_by = btchID, shape_by = grpID, ncomponents = 3)
+```
+
+
+
+
+
+
+***

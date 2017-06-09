@@ -1,0 +1,13 @@
+---
+title: "Benchmarking"
+---
+
+```{r optsSet, echo=FALSE, results="hide"}
+knitr::opts_chunk$set(echo = TRUE, message = FALSE, warning = FALSE , dpi = 400)
+```
+
+```{r, child='DE.Rmd'}
+```
+
+```{r, child='compare.Rmd'}
+```

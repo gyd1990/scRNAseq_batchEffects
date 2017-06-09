@@ -1,0 +1,376 @@
+
+
+
+# (PART) Comparison {-}
+
+# Overall Prediction Power
+
+To compare prediction power of each method recall, fallout, and the 
+accuracy of the estimated false discovery rate (FDR) are used.
+All results are stored in a vector of data tables.
+
+However, before I compare all methods I have to do a quality control.
+Some methods failed to produce p values for vertain genes.
+So, they only predicted a subset of all genes.
+This can bias the results.
+Here, I throw out every method which failed on more than 10% of all genes.
+
+```{r}
+for (i in seq_along(noCall)) {
+  if (noCall[[i]] >= 0.1 * nrow(sce)) {
+    print(paste("Sorry", names(noCall)[i]))
+    resVec[[names(noCall)[i]]] <- NULL
+  }
+}
+```
+
+All results will be stored in a vector.
+
+```{r}
+rocVec <- list()
+```
+
+The following function will be used to create confusion matrices.
+
+```{r}
+confuse <- function(ranks, labels, FDRs, n = 1000) {
+  # prepare table
+  stopifnot(length(ranks) == length(labels) & length(ranks) == length(FDRs))
+  dt <- data.table(rank = ranks, label = labels, FDR = FDRs)
+  steps <- seq.int(2, nrow(dt), length.out = n)
+  dt <- dt[order(rank)]
+  
+  # fill matrix with TPs, ...
+  m <- matrix(NA, n, 4, dimnames = list(steps, c("TP", "FP", "TN", "FN")))
+  for( s in seq_along(steps) ){
+    res <- dt[, .(TP = sum(rank < steps[s] & label != "random"), 
+                    FP = sum(rank < steps[s] & label == "random"), 
+                    TN = sum(rank >= steps[s] & label == "random"), 
+                    FN = sum(rank >= steps[s] & label != "random"))]
+    m[s, ] <- as.numeric(res[1, ])
+  }
+  return(list(confusionMatrix = m, predicted_FDR = dt[steps - 1, FDR]))
+}
+```
+
+This creates a list of true and false positive, 
+and true and false negative counts for the whole spectrum of predicted FDRs.
+The above function is then used to generate values for ROC and predicted and
+true FDRs.
+
+```{r}
+getROC <- function(vec, show = NULL) {
+  l <- lapply(names(vec), function(m){
+    if (is.null(show)) {
+      res <- resVec[[m]]
+    } else {
+      res <- resVec[[m]][label %in% show, ] 
+    }
+    cm <- confuse(res$rank, res$label, res$FDR)
+    data.table(
+      rec = cm[[1]][, 1] / (cm[[1]][, 1] + cm[[1]][, 4]),
+      fal = cm[[1]][, 2] / (cm[[1]][, 2] + cm[[1]][, 3]),
+      trueFDR = cm[[1]][, 2] / (cm[[1]][, 2] + cm[[1]][, 1]),
+      predFDR = cm[[2]],
+      method = m
+    )
+  })
+  return(do.call(rbind, l))
+}
+```
+
+In the following step, this function is applied on all results.
+
+```{r}
+roc <- getROC(resVec)
+```
+
+## ROC Curve
+
+A reasonable metric to compare the overall prediction power is the ROC curve.
+The curves for different methods are shown below.
+
+```{r}
+ggplot(roc) +
+  geom_abline(slope = 1, intercept = 0, color = "black", alpha = 0.3, linetype = 2) +
+  geom_path(aes(x = fal, y = rec, col = method)) +
+  scale_x_continuous(limits = c(0, 1)) +
+  scale_y_continuous(limits = c(0, 1)) +
+  theme_bw() +
+  ggtitle("ROC")
+```
+
+Areas under the curve can be calculated as a measure of prediction power.
+
+```{r}
+(aucs <- roc[, .(AUC = flux::auc(fal, rec)), by = method])
+ggplot(aucs) +
+  geom_bar(aes(x = method, y = AUC), stat = "identity") +
+  theme_bw() +
+  theme(axis.text.x = element_text(angle = 90, vjust = 1, hjust = 1)) +
+  ggtitle("AUC")
+```
+
+
+## FDR Control
+
+Another interesting metric would be the accuracy of predicted FDR.
+To visualize this predicted over true FDR is shown below.
+
+```{r}
+ggplot(roc) + 
+  geom_abline(slope = 1, intercept = 0, color = "black", alpha = 0.3, linetype = 2) +
+  geom_path(aes(x = trueFDR, y = predFDR, col = method)) +
+  scale_x_continuous(limits = c(0, 1)) +
+  scale_y_continuous(limits = c(0, 1)) +
+  theme_bw() +
+  ggtitle("FDR")
+```
+
+To visualize the impact of inaccurate FDR predictions true FDRs for 
+FDR predictions of 10% for each method are shown below.
+The red line represents the true FDR of 10%.
+
+```{r}
+(dt <- roc[, .(trueFDR = trueFDR[which.min(abs(predFDR - 0.1))]), by = method])
+ggplot(dt) +
+  geom_bar(aes(x = method, y = trueFDR), stat = "identity") +
+  geom_hline(yintercept = 0.1, color = "red", linetype = 2) +
+  theme_bw() +
+  theme(axis.text.x = element_text(angle = 90, vjust = 1, hjust = 1)) +
+  ggtitle("predicted FDR of 10%")
+```
+
+Results are stored.
+
+```{r}
+roc$type <- "full"
+rocVec[["full"]] <- roc
+```
+
+
+# Differential Shape Prediction Power
+
+Of particular interest here is how good can these methods 
+identify differential shapes.
+The above computation is repeated, but this time all differentially distributed 
+genes expect for only differential shapes are removed.
+
+```{r}
+roc <- getROC(resVec, c("random", "shape"))
+```
+
+## ROC Curve
+
+ROC curve are compared for predicting differential shapes only.
+
+```{r}
+ggplot(roc) +
+  geom_abline(slope = 1, intercept = 0, color = "black", alpha = 0.3, linetype = 2) +
+  geom_path(aes(x = fal, y = rec, col = method)) +
+  scale_x_continuous(limits = c(0, 1)) +
+  scale_y_continuous(limits = c(0, 1)) +
+  theme_bw() +
+  ggtitle("ROC - DS")
+```
+
+Areas under the curve can be calculated as a measure of prediction power.
+
+```{r}
+(aucs <- roc[, .(AUC = flux::auc(fal, rec)), by = method])
+ggplot(aucs) +
+  geom_bar(aes(x = method, y = AUC), stat = "identity") +
+  ggtitle("Area Under ROC Curve") +
+  theme_bw() +
+  theme(axis.text.x = element_text(angle = 90, vjust = 1, hjust = 1))
+```
+
+## FDR Control
+
+FDR control for differential shapes only is visualized.
+
+```{r}
+ggplot(roc) + 
+  geom_abline(slope = 1, intercept = 0, color = "black", alpha = 0.3, linetype = 2) +
+  geom_path(aes(x = trueFDR, y = predFDR, col = method)) +
+  scale_x_continuous(limits = c(0, 1)) +
+  scale_y_continuous(limits = c(0, 1)) +
+  theme_bw() +
+  ggtitle("FDR - DS")
+```
+
+To visualize the impact of inaccurate FDR predictions true FDRs for FDR 
+predictions of 10% for each method are shown below.
+The red line represents the true FDR of 10%.
+
+```{r}
+(dt <- roc[, .(trueFDR = trueFDR[which.min(abs(predFDR - 0.1))]), by = method])
+ggplot(dt) +
+  geom_bar(aes(x = method, y = trueFDR), stat = "identity") +
+  geom_hline(yintercept = 0.1, color = "red", linetype = 2) +
+  ggtitle("predicted FDR of 10%") +
+  theme_bw() +
+  theme(axis.text.x = element_text(angle = 90, vjust = 1, hjust = 1))
+```
+
+Results are stored.
+
+```{r}
+roc$type <- "shape"
+rocVec[["shape"]] <- roc
+```
+
+
+# Differential Mean and Shape Prediction Power
+
+Here, the classical methods should work but maybe the shape component is 
+underpowered.
+
+```{r}
+roc <- getROC(resVec, c("random", "both_a", "both_b"))
+```
+
+## ROC Curve
+
+ROC curve are compared for predicting differential shape and mean only.
+
+```{r}
+ggplot(roc) +
+  geom_abline(slope = 1, intercept = 0, color = "black", alpha = 0.3, linetype = 2) +
+  geom_path(aes(x = fal, y = rec, col = method)) +
+  scale_x_continuous(limits = c(0, 1)) +
+  scale_y_continuous(limits = c(0, 1)) +
+  theme_bw() +
+  ggtitle("ROC - DB")
+```
+
+Areas under the curve can be calculated as a measure of prediction power.
+
+```{r}
+(aucs <- roc[, .(AUC = flux::auc(fal, rec)), by = method])
+ggplot(aucs) +
+  geom_bar(aes(x = method, y = AUC), stat = "identity") +
+  ggtitle("Area Under ROC Curve") +
+  theme_bw() +
+  theme(axis.text.x = element_text(angle = 90, vjust = 1, hjust = 1))
+```
+
+## FDR Control
+
+FDR control for differential shape and mean only is visualized.
+
+```{r}
+ggplot(roc) + 
+  geom_abline(slope = 1, intercept = 0, color = "black", alpha = 0.3, linetype = 2) +
+  geom_path(aes(x = trueFDR, y = predFDR, col = method)) +
+  scale_x_continuous(limits = c(0, 1)) +
+  scale_y_continuous(limits = c(0, 1)) +
+  theme_bw() +
+  ggtitle("FDR - DB")
+```
+
+To visualize the impact of inaccurate FDR predictions true FDRs for 
+FDR predictions of 10% for each method are shown below.
+The red line represents the true FDR of 10%.
+
+```{r}
+(dt <- roc[, .(trueFDR = trueFDR[which.min(abs(predFDR - 0.1))]), by = method])
+ggplot(dt) +
+  geom_bar(aes(x = method, y = trueFDR), stat = "identity") +
+  geom_hline(yintercept = 0.1, color = "red", linetype = 2) +
+  ggtitle("predicted FDR of 10%") +
+  theme_bw() +
+  theme(axis.text.x = element_text(angle = 90, vjust = 1, hjust = 1))
+```
+
+Results are stored.
+
+```{r}
+roc$type <- "both"
+rocVec[["both"]] <- roc
+```
+
+# Differential Mean Prediction Power
+
+Finally, the situation where most methods were created for: 
+detecting differential means.
+
+```{r}
+roc <- getROC(resVec, c("random", "mean"))
+```
+
+## ROC Curve
+
+ROC curve are compared for predicting differential mean only.
+
+```{r}
+ggplot(roc) +
+  geom_abline(slope = 1, intercept = 0, color = "black", alpha = 0.3, linetype = 2) +
+  geom_path(aes(x = fal, y = rec, col = method)) +
+  scale_x_continuous(limits = c(0, 1)) +
+  scale_y_continuous(limits = c(0, 1)) +
+  theme_bw() +
+  ggtitle("ROC - DM")
+```
+
+Areas under the curve can be calculated as a measure of prediction power.
+
+```{r}
+(aucs <- roc[, .(AUC = flux::auc(fal, rec)), by = method])
+ggplot(aucs) +
+  geom_bar(aes(x = method, y = AUC), stat = "identity") +
+  ggtitle("Area Under ROC Curve") +
+  theme_bw() +
+  theme(axis.text.x = element_text(angle = 90, vjust = 1, hjust = 1))
+```
+
+## FDR Control
+
+FDR control for differential mean only is visualized.
+
+```{r}
+ggplot(roc) + 
+  geom_abline(slope = 1, intercept = 0, color = "black", alpha = 0.3, linetype = 2) +
+  geom_path(aes(x = trueFDR, y = predFDR, col = method)) +
+  scale_x_continuous(limits = c(0, 1)) +
+  scale_y_continuous(limits = c(0, 1)) +
+  theme_bw() +
+  ggtitle("FDR - DM")
+```
+
+To visualize the impact of inaccurate FDR predictions true FDRs 
+for FDR predictions of 10% for each method are shown below.
+The red line represents the true FDR of 10%.
+
+```{r}
+(dt <- roc[, .(trueFDR = trueFDR[which.min(abs(predFDR - 0.1))]), by = method])
+ggplot(dt) +
+  geom_bar(aes(x = method, y = trueFDR), stat = "identity") +
+  geom_hline(yintercept = 0.1, color = "red", linetype = 2) +
+  ggtitle("predicted FDR of 10%") +
+  theme_bw() +
+  theme(axis.text.x = element_text(angle = 90, vjust = 1, hjust = 1))
+```
+
+Results are stored.
+
+```{r}
+roc$type <- "mean"
+rocVec[["mean"]] <- roc
+```
+
+
+# Final Save
+
+The results vector is saved.
+
+```{r}
+ROC <- do.call(rbind, rocVec)
+saveRDS(ROC, "results/ROC.rds")
+saveRDS(noCall, "results/noCall.rds")
+```
+
+
+
+
+***

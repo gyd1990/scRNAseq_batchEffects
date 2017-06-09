@@ -1,0 +1,346 @@
+```{r, echo=FALSE, results='asis'}
+cat("# Group", as.character(groups[grpCount]))
+```
+
+## Init
+
+The tables created within each batch are subsetted for this group.
+An index for the batch numbers of this group is created.
+
+```{r}
+data <- allData[group == groups[grpCount], ]
+stats <- allStats[group == groups[grpCount], ]
+multis <- allMultis[group == groups[grpCount], ]
+pb <- allPB[group == groups[grpCount], ]
+allModels$group[[grpCount]] <- list()
+allCors$group[[grpCount]] <- list()
+btchIDX <- mapping[group == groups[grpCount], id]
+```
+
+
+## Average Expression
+
+Mean gene readcounts and variance and their log2 transformed values were computed.
+Zeros were excluded.
+Everything was collected in a base table **stats**.
+Infinite and NA values -- which arise mainly from genes without any non-zero count or from genes with too few non-zero counts -- were excluded.
+
+```{r}
+Hist(stats$aveExp, ld = TRUE, main = "Gene Average Expression")
+Dens(stats$aveExp, stats$batch, "average expression", "batch", ld = TRUE, main = "Genewise Average Expression")
+```
+
+
+## Variance
+
+Genewise variances were computed while excluding zero counts as well.
+
+```{r}
+Hist(stats$vars, ld = TRUE, main = "Gene Variance")
+Dens(stats$vars, stats$batch, "variance", "batch", ld = TRUE, main = "Genewise Variance")
+```
+
+The variance is known to be non-linearly dependent on average expression.
+
+```{r}
+ScatterDensity(stats$aveExp, stats$vars, "average expression", "variance", ld = "xy", title = "Genewise Var over aveExp")
+```
+
+
+
+
+## Genewise Poisson-Beta Distributions
+
+According to [Trung Nghia Vu et al](https://academic.oup.com/bioinformatics/article-abstract/32/14/2128/2288270/Beta-Poisson-model-for-single-cell-RNA-seq-data?redirectedFrom=fulltext)
+scRNA-seq gene count distributions follow a Poisson-Beta mixture.
+
+```{r}
+Hist(data$count[data$count > 0], "non-zero counts", ld = TRUE, main = "Non-zero Counts")
+```
+
+This distribution has parameters $k$, $\alpha$, $\beta$.
+For each gene all 3 parameters were estimated using the first 3 moments of this function.
+Zero counts were excluded.
+For some genes this estimation method did not work at all (e.g. negative parameter values were estimated).
+These were excluded.
+
+### Parameter k
+
+Distributions of the parameter showed a log-normal distribution.
+
+```{r}
+Dens(pb$k, pb$batch, "k", "batch", "Distribution of k", ld = TRUE)
+```
+
+They were fitted with a log-normal distribution (which in turn has parameters $mean$ and $sd$). 
+Outliers of k (5-95% quantile) were excluded.
+
+```{r}
+parm <- sapply(btchIDX, function(x) allModels$batch[[x]]$pb_k$estimate)
+allModels$group[[grpCount]]$pb_k <- parm
+parm
+```
+
+Below the distributions of the parameter in each batch are simulated according to the fitted log-normal model and displayed together with the actual parameters.
+
+```{r}
+s <- seq(min(log2(pb$k)), max(log2(pb$k)), length.out = 1000)
+m <- apply(parm, 2, function(x) dnorm(s, x[1], x[2]))
+PlotDistro(
+  log2(pb$k), 
+  newdata = rep(s, ncol(m)),
+  prediction = c(m),
+  col = rep(batches[btchIDX], each = length(s)),
+  "log2 k", "batch", "Parameter Distributions of k"
+)
+```
+
+
+### Parameter a
+
+Distributions of the parameter showed a log-normal distribution.
+
+```{r}
+Dens(pb$a, pb$batch, "a", "batch", "Distribution of a", ld = TRUE)
+```
+
+They were fitted with a log-normal distribution (which in turn has parameters $mean$ and $sd$). 
+Outliers of a (5-95% quantile) were excluded.
+
+```{r}
+parm <- sapply(btchIDX, function(x) allModels$batch[[x]]$pb_a$estimate)
+allModels$group[[grpCount]]$pb_a <- parm
+parm
+```
+
+Below the distributions of the parameter in each batch are simulated according to the fitted log-normal model and displayed together with the actual parameters.
+
+```{r}
+s <- seq(min(log2(pb$a)), max(log2(pb$a)), length.out = 1000)
+m <- apply(parm, 2, function(x) dnorm(s, x[1], x[2]))
+PlotDistro(
+  log2(pb$a), 
+  newdata = rep(s, ncol(m)),
+  prediction = c(m),
+  col = rep(batches[btchIDX], each = length(s)),
+  "log2 a", "batch", "Parameter Distributions of a"
+)
+```
+
+
+### Parameter b
+
+Distributions of the parameter showed a log-normal distribution.
+
+```{r}
+Dens(pb$b, pb$batch, "b", "batch", "Distribution of b", ld = TRUE)
+```
+
+They were fitted with a log-normal distribution (which in turn has parameters $mean$ and $sd$). 
+Outliers of a (5-95% quantile) were excluded.
+
+```{r}
+parm <- sapply(btchIDX, function(x) allModels$batch[[x]]$pb_b$estimate)
+allModels$group[[grpCount]]$pb_b <- parm
+parm
+```
+
+Below the distributions of the parameter in each batch are simulated according to the fitted log-normal model and displayed together with the actual parameters.
+
+```{r}
+s <- seq(min(log2(pb$b)), max(log2(pb$b)), length.out = 1000)
+m <- apply(parm, 2, function(x) dnorm(s, x[1], x[2]))
+PlotDistro(
+  log2(pb$b), 
+  newdata = rep(s, ncol(m)),
+  prediction = c(m),
+  col = rep(batches[btchIDX], each = length(s)),
+  "log2 b", "batch", "Parameter Distributions of b"
+)
+```
+
+
+
+
+
+
+
+## Normality
+
+Gene readcount distributions are said to be roughly normal distributed on a log2 scale.
+Normality was tested with Shapiro Wilks while zero counts were excluded.
+P values were FDR adjusted (FDR<5%).
+
+```{r}
+prop.table(table(stats$norm)) * 100
+Barplot(stats$norm, stats$batch, "normal distribution", "batch", "Normality in Genwise Count Distributions")
+```
+
+Log normal distribution is said to be true rather for high average expression.
+
+```{r}
+Dens(stats$aveExp, stats$norm, "average expression", "normal distribution", ld = TRUE, 
+     main = "Genewise Normal Distributions and Average Expression")
+```
+
+
+
+## Modes
+
+The number of modes in the distributions of genewise log2 counts were estimated.
+Zero counts were excluded for this.
+A density was estimated for each distribution using a Gauss kernel and a pre-set bandwidth.
+For this estimation 512 seeds were set across the distribution.
+Local maxima in for these seeds were counted as modes.
+
+A problem is, that the log2 scale creates a gap between 0 and 1.
+The bandwidth was set to 0.5 so that this gap would not be identified as 2 modes.
+With a bandwith of 0.5 2 maxima would have to be more than 1 tick away on the log2 scale (at least double in count).
+
+```{r}
+prop.table(table(stats$modes)) * 100
+Barplot(as.character(stats$modes), stats$batch, "modes", "batch", "Modes in Genwise Count Distributions")
+```
+
+Modes are compared to the average expression.
+Zeros were excluded during average expression calculation.
+
+```{r}
+Dens(stats$aveExp, stats$modes == 1, "average expression", "unimodal distribution", ld = TRUE,
+     main = "Unimodal Distribution over Average Expression")
+```
+
+These are average expression distributions for unimodal gene distributions.
+
+```{r}
+Dens(stats[modes == 1, aveExp], stats[modes == 1, batch], "average expression", "batch", ld = TRUE,
+     main = "Average Expression Distributions for Unimodal Gene Distributions")
+```
+
+These are average expression distributions for multimodal gene distributions.
+
+```{r}
+Dens(stats[modes > 1, aveExp], stats[modes > 1, batch], "average expression", "batch", ld = TRUE,
+     main = "Average Expression Distributions for Multimodal Gene Distributions")
+```
+
+
+### Normality and Unimodality
+
+Here, the correlation between the number modes and normal distribution is shown.
+
+```{r}
+(tab <- table(stats[, .(modes, norm)]))
+mosaic(tab, shade = TRUE, legend = TRUE)
+```
+
+
+
+
+
+## Multimodal Distributions
+
+What follows are statistics about multimodal distributions only.
+
+```{r}
+table(stats$modes > 1)
+prop.table(table(stats$modes > 1)) * 100
+```
+
+Variances between the x and y coordinates of estimated densities of these distributions were calculated.
+X variance describes the variance of the modes' position on log2 count.
+Y variance describes the variance in density between modes.
+
+### X Variances in Multimodal Distributions
+
+For a multimodal distribution this is the variance of x positions of modes -- the variance of log2 count of modes.
+The distribution of these variances is shown and their dependency to average gene expression are shown.
+
+```{r}
+Dens(multis$xVar, multis$batch, "x variance", "batch",
+     main = "Distribution of X Var of Modes")
+ScatterDensity(multis$aveExp, multis$xVar, "average expression", "x var of modes", ld = "x",
+               title = "X Var of Modes over Average Expression")
+```
+
+### Y Variances in Multimodal Distributions
+
+For a multimodal distribution this is the variance of y density positions of modes -- the variance of the proprtional number of counts.
+The distribution of these variances is shown and their dependency to average gene expression are shown.
+
+```{r}
+Dens(multis$yVar, multis$batch, "y variance", "batch", main = "Y Var of Modes")
+ScatterDensity(multis$aveExp, multis$yVar, "average expression", "y var of modes", ld = "x",
+               title = "Y Var of Modes over Average Expression")
+```
+
+
+
+## Average Gene Expression Correlation
+
+Expression correlation between batches is estimated with the Pearson Correlation Coefficient of log2 of average readcount per gene.
+
+```{r}
+m <- dcast(stats, gene ~ batch, value.var = "ld_aveExp")
+m <- na.omit(m)
+allCors$group[[grpCount]]$batchXbatch_avExp <- cor(m[, -1])
+pairs(formula(paste("~", names(m)[-1], collapse = "+")), data = m, 
+      lower.panel = panel.smooth, upper.panel = panel.cor, pch = 20, main = "Batch Readcount Correlation")
+```
+
+
+
+## Normality Correlation
+
+Normality of a gene readcount distribution was tested with a Shapiro Wilks test (FDR adjusted, FDR<0.05).
+The co-occurrence of normality per gene is compared among batches.
+
+```{r}
+m <- dcast(stats, gene ~ batch, value.var = "norm")
+m <- na.omit(m)
+tab <- table(m[, -1])
+allCors$group[[grpCount]]$norms <- tab
+mosaic(tab, shade = TRUE, legend = TRUE, main = "Batch Normality Correlation")
+for( i in 2:(ncol(m) - 1) ){
+  for( k in (i + 1):ncol(m) ){
+    print(tab <- table(m[, c(i, k), with = FALSE]))
+    mosaic(tab, shade = TRUE, legend = TRUE, 
+           main = sprintf("%s vs %s Normality Correlation", names(m)[i], names(m)[k]))
+  }
+}
+```
+
+
+
+## Mode Correlation
+
+Correlation in the number of modes for each gene are compared among batches.
+
+```{r}
+m <- dcast(stats, gene ~ batch, value.var = "modes")
+m <- na.omit(m)
+tab <- table(m[, -1])
+allCors$group[[grpCount]]$modes <- tab
+mosaic(tab, shade = TRUE, legend = TRUE, main = "Batch Mode Correlation")
+for( i in 2:(ncol(m) - 1) ){
+  for( k in (i + 1):ncol(m) ){
+    print(tab <- table(m[, c(i, k), with = FALSE]))
+    mosaic(tab, shade = TRUE, legend = TRUE,
+           main = sprintf("%s vs %s Mode Correlation", names(m)[i], names(m)[k]))
+  }
+}
+```
+
+
+
+## Finish Group
+
+Group counter is incremented.
+
+
+```{r}
+grpCount <- grpCount + 1
+```
+
+
+

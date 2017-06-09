@@ -1,0 +1,70 @@
+---
+title: "Data Characterization"
+---
+
+```{r optsSet, echo=FALSE, results="hide"}
+knitr::opts_chunk$set(echo = TRUE, message = FALSE, warning = FALSE , dpi = 400)
+options(digits = 2)
+```
+
+# Init
+
+Packages are loaded and dataset parameters are set.
+
+```{r}
+library(scater)
+library(data.table)
+library(fitdistrplus)
+library(vcd)
+library(FAdist)
+source("R/plots.R")
+source("R/GetModes.R")
+source("R/PoiBeta.R")
+
+grpID <- "group"
+btchID <- "batch"
+smplID <- "sample"
+```
+
+
+
+# (PART) Readcount Table {-}
+
+# Init
+
+The expression set is loaded.
+
+```{r}
+sce <- readRDS("intermediate_data/normed.rds")
+```
+
+The relevant values are counts.
+
+```{r}
+values <- counts
+```
+
+```{r, child='characterize.Rmd'}
+```
+
+
+
+# (PART) Relative Log Expression Table {-}
+
+# Init
+
+The relevant values are expression values.
+They are log2 transformed, so here they are transformed back.
+
+```{r}
+values <- function(x) 2^exprs(x)
+```
+
+```{r, child='characterize_noZeros.Rmd'}
+```
+
+
+
+***
+
+
