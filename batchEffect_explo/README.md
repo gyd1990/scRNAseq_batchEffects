@@ -13,11 +13,11 @@ The code for this experiment is in *batchEffect_explo*.
 For both grids (in subdirectories *grid1/*, *grid2/*) the python script
 *run_gridSearch.py* will create all simulations (768 for each grid).
 
-   cd grid1/
-   ./run_gridSearch.py
-   cd ../grid2/
-   ./run_gridSearch.py
-   cd ..
+    cd grid1/
+    ./run_gridSearch.py
+    cd ../grid2/
+    ./run_gridSearch.py
+    cd ..
 
 This will run for several hours and take up around 80GB.
 For each parameter combination a directory is created
