@@ -1,0 +1,305 @@
+---
+title: "Data Quality Report"
+author: "Marc Schwering"
+output:
+  html_document:
+    number_sections: true
+    toc: true
+    toc_depth: 2
+    fig_width: 10
+    fig_height: 7
+    theme: cosmo
+---
+
+
+```{r optsSet, echo=FALSE, results="hide"}
+knitr::opts_chunk$set(echo = TRUE, message = FALSE, warning = FALSE , dpi = 400)
+```
+
+
+
+# Pre-Processing
+
+## Parameters
+
+These are parameters used in quality control and library size normalization.
+IDs are used to access feature entries during the analysis.
+The simulated data resembles UMIs which is indicated with *molecules* here.
+
+```{r}
+quantity <- "molecules"
+
+grpID <- "group"
+btchID <- "batch"
+smplID <- "sample"
+```
+
+## Load Data
+
+The simulation created a dataset with 3 tables.
+The **molecules** table contains counted molecules incorporating UMIs.
+The **annotation** table contains phenotypic annotations -- cell annotations.
+The 3rd table contains feature (gene) information. It is used later.
+The following libraries will be used throughout the analysis.
+
+```{r, warning=FALSE, message=FALSE}
+options(digits = 2)
+library(scran)
+library(scater)
+library(ggplot2)
+library(data.table)
+
+ds <- readRDS("data/simulation.rds")
+molecules <- ds$table
+annotation <- ds$pData
+```
+
+
+## Data Consistency
+
+These are some basic consistency and sanity checks for the data.
+
+```{r}
+dim(molecules)
+molecules[1:5, 1:5]
+any(is.null(molecules) | is.na(molecules))
+summary(as.vector(as.matrix(molecules)))
+```
+
+
+## Create SCE Dataset
+
+Phenotypic data is stored in the annotation file.
+This is information about the samples (cells) with batch IDs and group IDs.
+
+```{r}
+pheno_data <- new("AnnotatedDataFrame", annotation)
+rownames(pheno_data) <- pheno_data[[smplID]]
+table(annotation[[grpID]])
+table(annotation[[btchID]])
+```
+
+Feature data (about genes) is created from the provided
+3rd table created during simulation.
+
+```{r}
+feature_data <- ds$fData
+feature_data <- new("AnnotatedDataFrame", feature_data)
+rownames(feature_data) <- feature_data$gene
+```
+
+Everything is combined into a single cell 
+expression dataset which is used throuout the analysis.
+
+```{r}
+rownames(molecules) <- rownames(feature_data)
+rownames(pheno_data) <- pheno_data[[smplID]]
+colnames(molecules) <- rownames(pheno_data)
+sce <- newSCESet(
+  countData = molecules,
+  phenoData = pheno_data,
+  featureData = feature_data
+)
+dim(sce)
+```
+
+## Zero Genes
+
+Genes without any count in any cell do not contain information 
+and can savely be removed.
+
+```{r}
+nonzero_genes <- rowSums(counts(sce) > 0) > 0
+table(nonzero_genes)
+dt <- data.table(
+  label = fData(sce)$label, 
+  dropout = !nonzero_genes
+)
+dt[, .(total = sum(dropout), 
+       proportion = sum(dropout) / length(dropout)), by = label]
+sce <- sce[nonzero_genes, ]
+```
+
+## Calculate Quality Control Metrics
+
+Quality control metrics are calculated.
+
+```{r}
+sce <- calculateQCMetrics(sce)
+```
+
+
+
+
+
+
+
+# Cell Filtering
+
+## Scater Default Cell Filter
+
+There is a default cell filter by the scater package.
+It removes cells with 
+* more than 5 MAD (on log10 scale) from median total readcounts
+* more than 5 MAD from median features detected
+
+```{r}
+sce$filter_cells_default <- (
+  !sce$filter_on_total_counts &
+  !sce$filter_on_total_features 
+)
+table(sce$filter_cells_default)
+```
+
+
+## PCA Outlier Detection
+
+The scater package another filter which identifies outliers based on a PCA plot.
+
+```{r, message=FALSE, warning=FALSE, include=FALSE, results='hide'}
+sce <- plotPCA(sce, size_by = "total_features",  pca_data_input = "pdata", 
+               detect_outliers = TRUE, return_SCESet = TRUE)
+```
+```{r}
+table(sce$outlier)
+```
+
+
+
+
+## Cell Filter Comparison
+
+These cells are filtered out in this simulation because such cells would be
+filtered out in a real dataset.
+
+```{r}
+sce$filter_cells_final <- sce$filter_cells_default & !sce$outlier
+table(sce$filter_cells_final)
+sce <- sce[, sce$filter_cells_final]
+```
+
+
+
+
+
+
+
+# Gene Filtering
+
+## Low Abundance Genes
+
+As for zero genes these genes are problematic in downstream analysis 
+and are filtered out.
+As in a real dataset these genes are filtered out in the simulation as well.
+There are two different methods to identify low abundance genes.
+
+### Mean Expression
+
+Here, low abundance genes are defined as genes with a mean expression 
+of below 1 for readcounts and below 0.01 for UMIs.
+This method only filters out genes which are neither expressed in 
+many cells nor expressed highly in few cells.
+
+```{r}
+aveCounts <- rowMeans(counts(sce))
+filter_on_ave_count <- 
+  aveCounts >= switch(quantity, reads = 1, molecules = 0.01)
+table(filter_on_ave_count)
+```
+
+### Number of Expressing Cells
+
+Another method to identify low abundance genes is by 
+the number of cells in which they are expressed.
+This method is more stringent and will filter out rare cell types.
+A threshold for identifying expression in a single cell and a 
+threshold for the minimum number of expressing cells can be set.
+For UMIs the threshold for expression is usually defined 
+as more than 1 count, for readcounts it is defined as more than 4 counts.
+Here, the minimum expressing cells is 
+set to 1% of all cells (all batches combined).
+
+```{r}
+nCounts <- switch(quantity, reads = 4, molecules = 1)
+nCells <- ceiling(ncol(counts(sce)) * 0.01)
+exprCells <- apply(counts(sce), 1, function(x) sum(x > nCounts))
+filter_on_expr_cells <- exprCells >= nCells
+table(filter_on_expr_cells)
+```
+
+## Summary
+
+Both filters are used.
+These filters are used on the simulated data because such genes would be 
+filtered out in a real dataset as well.
+
+```{r}
+fData(sce)$filter_genes_final <- filter_on_ave_count & filter_on_expr_cells
+table(fData(sce)$filter_genes_final)
+sce <- sce[fData(sce)$filter_genes_final, ]
+```
+
+
+
+
+
+
+
+
+
+
+# Library Size Normalization
+
+The simulation did not create significantly differing library sizes.
+A library size normalization is therefore not necessary.
+However, there are many zeros in the dataset which would be removed by 
+a library size normalization such as the method by
+[Lun et al](https://genomebiology.biomedcentral.com/articles/10.1186/s13059-016-0947-7).
+
+Here, cell pools are created within which expression is 
+summed creating pool-based size factors. 
+These can be deconvoluted back into cell-based size factors.
+Size factors are calculated using the median, which assumes at least 50% of 
+genes are not differentially expressed between cells within a pool.
+Robustness to this assumption is provided by always pooling 
+cells with similar library sizes.
+Further robustness to heterogenic cells can be provided by first 
+clustering cell by correlation.
+
+```{r}
+# correl cluster
+minClust <- if (ncol(sce) > 800) 200 else 60
+clust <- quickCluster(sce, min.size = minClust)
+# grp cluster
+#clust <- pData(sce)[[grpID]]
+if (min(table(clust)) > 200) {
+  poolSizes <- c(20, 40, 60, 80, 100)
+} else {
+  poolSizes <- c(10, 20, 30)
+}
+sce <- computeSumFactors(sce, sizes = poolSizes, clusters = clust)
+```
+
+Finally, counts are normalized using cell-wise size factors.
+In the same step they are log2 transformed to 
+provide some variance stabilization (+1 to avoid zeros).
+
+```{r}
+sce <- scater::normalize(sce)
+```
+
+
+
+
+# Visualization
+
+Here is a final PCA plot and the save.
+
+```{r}
+scater::plotPCA(sce, colour_by = btchID, shape_by = grpID, ncomponents = 3)
+saveRDS(sce, "intermediate_data/normed.rds")
+```
+
+
+
+***

@@ -1,0 +1,176 @@
+---
+title: "Estimate Batch Effects"
+author: "Marc Schwering"
+output:
+  html_document:
+    number_sections: true
+    toc: true
+    toc_depth: 2
+    fig_width: 10
+    fig_height: 7
+    theme: cosmo
+---
+
+
+
+```{r optsSet, echo=FALSE, results="hide"}
+knitr::opts_chunk$set(echo = TRUE, message = FALSE, warning = FALSE , dpi = 400)
+options(digits = 2)
+```
+
+# Load
+
+Packages and functions are loaded, the sce object is laoded, 
+and variables are set.
+
+```{r, warning=FALSE, message=FALSE}
+grpID <- "group"
+btchID <- "batch"
+smplID <- "sample"
+
+library(scran) # normalization
+library(scater) # single cell expression set
+library(ggplot2) # plotting
+library(data.table) # data base like tables
+library(kBET) # batch effect estimation
+library(limma) # estimate robust inter-batch correlations
+
+sce <- readRDS("intermediate_data/normed.rds")
+```
+
+Define some variables.
+Here, batches 1 to 3 belong to group 1 and the others to group 2.
+
+```{r}
+batches <- unique(sce[[btchID]])
+groups <- unique(sce[[grpID]])
+btchIDX <- rep(1:2, each = 3)
+```
+
+
+
+
+
+
+# Cell Number
+
+We thought of important measures to capture the batch effect of a dataset.
+One important measure might be the average number of cells per batch.
+When pooling cells from several batches, pooled cells are falsly assumed as
+indepentend measurements by the statistical test.
+Since this is not true, the severness of this assumption should somehow be
+related to the actual number of cells per batch.
+
+```{r}
+(n_hat <- as.vector(ncol(sce) / length(batches)))
+```
+
+
+# Within Batch Variability
+
+The batch effect is probably ralted to the relation of variability 
+within batches and the variability between batches.
+Here, we calculated the within batch variability as the 
+average gene distribution coefficient of variation within each batch, 
+averaged over all batches.
+We do that on the library size normalized values before log transformation.
+
+```{r}
+cv <- function(x) sd(x) / mean(x)
+meanCVs <- numeric(length(batches))
+for (i in seq_along(batches)) {
+  x <- apply(exp(exprs(sce)[, sce[[btchID]] == batches[i]]), 1, cv)
+  meanCVs <- mean(x)
+}
+(sig_hat_within <- mean(meanCVs))
+```
+
+
+# Between Batch Variability
+
+For between batch variability we calculate the coefficient of variation
+between the average genewise expressions of batches within groups.
+These values are then averaged over genes and groups.
+We do that on the library size normalized values before log transformation.
+
+```{r}
+CVs <- numeric(2)
+for (grp in 1:2) {
+  grpBatches <- batches[btchIDX == grp]  
+  l <- lapply(grpBatches, function(batch) {
+    rowMeans(exp(exprs(sce)[, sce[[btchID]] == batch]))
+  })
+  CVs[grp] <- mean(apply(do.call(cbind, l), 1, cv))
+}
+(sig_hat_between <- mean(CVs))
+```
+
+
+
+
+# kBET
+
+Using [kBET](https://github.com/theislab/kBET) Pearson's $\chi^2$ tests
+are performed to compare the mixture of batches of the overall dataset
+with the mixture of batches in local neighbourhoods.
+Local neighbourhoods are defined by a k-nearest-neighbour kernel.
+Here, we use the ratio of local to global expected means
+as a measure of the batch effect.
+We will also use non-transformed values here, as the package does not 
+specify otherwise.
+
+```{r}
+res <- kBET(t(exp(exprs(sce))), sce[[btchID]], plot = FALSE)$summary
+(kBET_rate <- res$kBET.observed[1] - res$kBET.expected[1])
+```
+
+The significance will also be saved.
+
+```{r}
+(kBET_pVal <- res$kBET.signif[1])
+```
+
+
+# LMM
+
+Fit a linear mixed model with a random effect for bacthes and a fixed effect
+for each gene by REML.
+Here, we use the average estimated inter-batch correlation as a measure for
+the batch effect.
+The average is the trimmed mean of the individual correlations on the 
+atanh-transformed scale.
+
+```{r}
+corrs <- duplicateCorrelation(
+  exprs(sce), 
+  design = model.matrix(~ 1 + sce[[grpID]]), 
+  block = sce[[btchID]]
+)
+(batch_corrs <- corrs$consensus.correlation)
+```
+
+
+
+
+
+
+# Save
+
+Final save.
+
+```{r}
+estimates <- list(
+  n_hat = n_hat,
+  sig_hat_within = sig_hat_within,
+  sig_hat_between = sig_hat_between,
+  kBET_rate = kBET_rate,
+  kBET_pVal = kBET_pVal,
+  batch_corrs = batch_corrs
+)
+saveRDS(estimates, "results/estimates.rds")
+```
+
+
+
+
+***

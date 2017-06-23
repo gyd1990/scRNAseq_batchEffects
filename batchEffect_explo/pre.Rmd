@@ -1,0 +1,868 @@
+---
+title: "Batch Effect Exploration"
+subtitle: "Pre Processing"
+author: "Marc Schwering"
+output:
+  html_document:
+    number_sections: true
+    toc: true
+    toc_depth: 2
+    fig_width: 10
+    fig_height: 7
+    theme: cosmo
+---
+
+
+
+
+# Introduction
+
+In this script, the data is loaded and structured into data tables.
+A quality control is performed and then variable distributions are visualized.
+
+## Loading Data
+
+First, libraries are loaded.
+
+```{r, message=FALSE, results='hide'}
+library(ggplot2) # plotting
+library(corrplot) # corr heatmaps
+library(data.table) # database-like tables
+library(highcharter) # interactive plots
+```
+
+### Grid 1
+
+The first parameter grid was spanned over $n$, $b$, $g$, $c$ 
+with 3 simulations each.
+
+```{r}
+n <- c(50, 100, 200, 500)
+b <- c(1, 2, 4, 8)
+g <- c(1, 2, 3, 4)
+c <- c(0.5, 0.7, 1.0, 1.3)
+sim <- c(1, 2, 3)
+parameter.grid <- expand.grid(n = n, b = b, g = g, c = c, sim = sim)
+parameter.grid <- setDT(parameter.grid)
+```
+
+For each combination of parameters all 3 simulations were processed
+in a distinct directory.
+Here, the directory paths are constructed according to `parameter.grid`.
+
+```{r}
+subdir <- "grid1"
+paths <- apply(parameter.grid, 1, function(x) {
+  sprintf("%s/n%d_b%.1f_g%.1f_c%.1f/sim%d", 
+          subdir, x[1], x[2], x[3], x[4], x[5])
+})
+```
+
+Results are files *AUC.rds*, *estimates.rds*, *FDR.rds*, *noCall.rds*.
+
+
+**Parameter Esitmates**
+
+For each simulation, parameters $\hat n$, $\hat\sigma_{within}$,
+and $\hat\sigma_{between}$
+(actually $\hat\sigma$ should be $\hat{cv}$), $kBET_{rate}$, $kBET_{pVal}$,
+and $batch_{corrs}$ were estimated.
+In case a simulation failed, a placeholder of NaNs is entered.
+
+```{r, warning=FALSE}
+placeholder <- list(
+  n_hat = NaN, 
+  sig_hat_within = NaN, 
+  sig_hat_between = NaN,
+  kBET_rate = NaN,
+  kBET_pVal = NaN,
+  batch_corrs = NaN
+)
+l <- lapply(paths, function(x) {
+  tryCatch(readRDS(file.path(x, "results", "estimates.rds")),
+           error = function(e) placeholder)
+})
+l <- lapply(l, as.data.table)
+estimates1<- do.call(rbind, l)
+```
+
+`estimates` is concatenated with the respective parameter combinations.
+
+```{r}
+estimates1 <- cbind(parameter.grid, estimates1)
+```
+
+
+**No Calls**
+
+The proportion of p values which were not a number, were collected in a
+list for each test procedure.
+Here, they are loaded.
+
+```{r, warning=FALSE}
+placeholder <- list(
+  edgeR_sum = NaN, 
+  scDD_pool_ks = NaN, 
+  DESeq2_sum = NaN, 
+  consensus_edgeR = NaN, 
+  consensus_DESeq2 = NaN
+)
+l <- lapply(paths, function(x) {
+  tryCatch(readRDS(file.path(x, "results", "noCall.rds")), 
+           error = function(e) placeholder)
+})
+l <- lapply(l, as.data.table)
+noCall1 <- do.call(rbind, l)
+```
+
+`noCall` is concatenated with the respective true and estimated
+parameter combinations.
+
+```{r}
+noCall1 <- cbind(estimates1, noCall1)
+```
+
+
+
+**AUC Values**
+
+AUCs are stored in tables.
+There are AUCs for each of the 5 methods and
+each of the 4 different types of differential distribution.
+The placeholder for missing files is adjusted accordingly.
+
+```{r, warning=FALSE}
+placeholder <- data.table(
+  method = "", 
+  AUC = NaN, 
+  type = ""
+)
+l <- lapply(paths, function(x) {
+  tryCatch(readRDS(file.path(x, "results", "AUC.rds")), 
+           error = function(e) placeholder)
+})
+```
+
+Before combining them to a single table, the parameter information is added.
+
+```{r, results='hide'}
+for (i in seq_along(l)) {
+  l[[i]]$n <- estimates1[i, n]
+  l[[i]]$b <- estimates1[i, b]
+  l[[i]]$g <- estimates1[i, g]
+  l[[i]]$c <- estimates1[i, c]
+  l[[i]]$sim <- estimates1[i, sim]
+  l[[i]]$n_hat <- estimates1[i, n_hat]
+  l[[i]]$sig_hat_within <- estimates1[i, sig_hat_within]
+  l[[i]]$sig_hat_between <- estimates1[i, sig_hat_between]
+  l[[i]]$kBET_rate <- estimates1[i, kBET_rate]
+  l[[i]]$kBET_pVal <- estimates1[i, kBET_pVal]
+  l[[i]]$batch_corrs <- estimates1[i, batch_corrs]
+  if (nrow(l[[i]]) < 1) stop(i)
+}
+AUC1 <- do.call(rbind, l)
+```
+
+
+
+**FDR Control**
+
+FDRs are structured in tables with $method$, $trueFDR$, $predFDR$, and
+$type$.
+There are values for each of the 4 types, each of the 5 methods, and
+for each of the 3 predicted FDRs 0.01, 0.05, and 0.10.
+
+```{r, warning=FALSE}
+placeholder <- data.table(
+  method = "", 
+  trueFDR = NaN, 
+  predFDR = NaN, 
+  type = ""
+)
+l <- lapply(paths, function(x) {
+  tryCatch(readRDS(file.path(x, "results", "FDR.rds")), 
+           error = function(e) placeholder)
+})
+```
+
+Again the parameter information is added.
+
+```{r, results='hide'}
+for (i in seq_along(l)) {
+  l[[i]]$n <- estimates1[i, n]
+  l[[i]]$b <- estimates1[i, b]
+  l[[i]]$g <- estimates1[i, g]
+  l[[i]]$c <- estimates1[i, c]
+  l[[i]]$sim <- estimates1[i, sim]
+  l[[i]]$n_hat <- estimates1[i, n_hat]
+  l[[i]]$sig_hat_within <- estimates1[i, sig_hat_within]
+  l[[i]]$sig_hat_between <- estimates1[i, sig_hat_between]
+  l[[i]]$kBET_rate <- estimates1[i, kBET_rate]
+  l[[i]]$kBET_pVal <- estimates1[i, kBET_pVal]
+  l[[i]]$batch_corrs <- estimates1[i, batch_corrs]
+  if (nrow(l[[i]]) < 1) stop(i)
+}
+FDR1 <- do.call(rbind, l)
+```
+
+
+
+### Grid 2
+
+The same thing as above is essentially done with grid 2.
+Here, the parameters were different.
+
+```{r}
+n <- c(50, 100, 200, 300)
+b <- c(0.5, 0.7, 1, 1.5)
+g <- c(0.5, 0.7, 1, 1.5)
+c <- c(0.5, 0.7, 1.0, 1.3)
+sim <- c(1, 2, 3)
+parameter.grid <- expand.grid(n = n, b = b, g = g, c = c, sim = sim)
+parameter.grid <- setDT(parameter.grid)
+```
+
+Paths are constructed.
+
+```{r}
+subdir <- "grid2"
+paths <- apply(parameter.grid, 1, function(x) {
+  sprintf("%s/n%d_b%.1f_g%.1f_c%.1f/sim%d", 
+          subdir, x[1], x[2], x[3], x[4], x[5])
+})
+```
+
+Results are files *AUC.rds*, *estimates.rds*, *FDR.rds*, *noCall.rds*.
+
+
+**Parameter Esitmates**
+
+For each simulation, parameters $\hat n$, $\hat\sigma_{within}$,
+and $\hat\sigma_{between}$
+(actually $\hat\sigma$ should be $\hat{cv}$), $kBET_{rate}$, $kBET_{pVal}$,
+and $batch_{corrs}$ were estimated.
+In case a simulation failed, NaNs are entered.
+
+```{r, warning=FALSE}
+placeholder <- list(
+  n_hat = NaN, 
+  sig_hat_within = NaN, 
+  sig_hat_between = NaN,
+  kBET_rate = NaN,
+  kBET_pVal = NaN,
+  batch_corrs = NaN
+)
+l <- lapply(paths, function(x) {
+  tryCatch(readRDS(file.path(x, "results", "estimates.rds")),
+           error = function(e) placeholder)
+})
+l <- lapply(l, as.data.table)
+estimates2<- do.call(rbind, l)
+```
+
+`estimates` is concatenated with the respective parameter combinations.
+
+```{r}
+estimates2 <- cbind(parameter.grid, estimates2)
+```
+
+
+**No Calls**
+
+The proportion of p values which were not a number, were collected in a
+list for each test procedure.
+Here, they are loaded.
+
+```{r, warning=FALSE}
+placeholder <- list(
+  edgeR_sum = NaN, 
+  scDD_pool_ks = NaN, 
+  DESeq2_sum = NaN, 
+  consensus_edgeR = NaN, 
+  consensus_DESeq2 = NaN
+)
+l <- lapply(paths, function(x) {
+  tryCatch(readRDS(file.path(x, "results", "noCall.rds")), 
+           error = function(e) placeholder)
+})
+l <- lapply(l, as.data.table)
+noCall2 <- do.call(rbind, l)
+```
+
+`noCall` is concatenated with the respective true and estimated
+parameter combinations.
+
+```{r}
+noCall2 <- cbind(estimates2, noCall2)
+```
+
+
+
+**AUC Values**
+
+AUCs are stored in tables.
+There are AUCs for each of the 5 methods and
+each of the 4 different types of differential distribution.
+The placeholder for missing files is adjusted accordingly.
+
+```{r, warning=FALSE}
+placeholder <- data.table(
+  method = "", 
+  AUC = NaN, 
+  type = ""
+)
+l <- lapply(paths, function(x) {
+  tryCatch(readRDS(file.path(x, "results", "AUC.rds")), 
+           error = function(e) placeholder)
+})
+```
+
+Before combining them to a single table, the parameter information is added.
+
+```{r, results='hide'}
+for (i in seq_along(l)) {
+  l[[i]]$n <- estimates2[i, n]
+  l[[i]]$b <- estimates2[i, b]
+  l[[i]]$g <- estimates2[i, g]
+  l[[i]]$c <- estimates2[i, c]
+  l[[i]]$sim <- estimates2[i, sim]
+  l[[i]]$n_hat <- estimates2[i, n_hat]
+  l[[i]]$sig_hat_within <- estimates2[i, sig_hat_within]
+  l[[i]]$sig_hat_between <- estimates2[i, sig_hat_between]
+  l[[i]]$kBET_rate <- estimates2[i, kBET_rate]
+  l[[i]]$kBET_pVal <- estimates2[i, kBET_pVal]
+  l[[i]]$batch_corrs <- estimates2[i, batch_corrs]
+  if (nrow(l[[i]]) < 1) stop(i)
+}
+AUC2 <- do.call(rbind, l)
+```
+
+
+
+**FDR Control**
+
+FDRs are structured in tables with $method$, $trueFDR$, $predFDR$, and
+$type$.
+There are values for each of the 4 types, each of the 5 methods, and
+for each of the 3 predicted FDRs 0.01, 0.05, and 0.10.
+
+```{r, warning=FALSE}
+placeholder <- data.table(
+  method = "", 
+  trueFDR = NaN, 
+  predFDR = NaN, 
+  type = ""
+)
+l <- lapply(paths, function(x) {
+  tryCatch(readRDS(file.path(x, "results", "FDR.rds")), 
+           error = function(e) placeholder)
+})
+```
+
+Again the parameter information is added.
+
+```{r, results='hide'}
+for (i in seq_along(l)) {
+  l[[i]]$n <- estimates2[i, n]
+  l[[i]]$b <- estimates2[i, b]
+  l[[i]]$g <- estimates2[i, g]
+  l[[i]]$c <- estimates2[i, c]
+  l[[i]]$sim <- estimates2[i, sim]
+  l[[i]]$n_hat <- estimates2[i, n_hat]
+  l[[i]]$sig_hat_within <- estimates2[i, sig_hat_within]
+  l[[i]]$sig_hat_between <- estimates2[i, sig_hat_between]
+  l[[i]]$kBET_rate <- estimates2[i, kBET_rate]
+  l[[i]]$kBET_pVal <- estimates2[i, kBET_pVal]
+  l[[i]]$batch_corrs <- estimates2[i, batch_corrs]
+  if (nrow(l[[i]]) < 1) stop(i)
+}
+FDR2 <- do.call(rbind, l)
+```
+
+
+## Final Tables
+
+Bind tables of both grids and clean up.
+
+```{r, results='hide'}
+estimates <- rbind(estimates1, estimates2)
+noCall <- rbind(noCall1, noCall2)
+AUC <- rbind(AUC1, AUC2)
+FDR <- rbind(FDR1, FDR2)
+rm(estimates1, estimates2, noCall1, noCall2, AUC1, AUC2, FDR1, FDR2)
+gc()
+```
+
+**Rename Features**
+
+Actually $\hat\sigma$ should be $\hat{cv}$.
+I will correct this first.
+
+```{r}
+names(estimates) <- c("n", "b", "g", "c", "sim", "n_hat", "cv_hat_within", 
+                      "cv_hat_between", "kBET_rate", "kBET_pVal", "batch_corrs")
+names(noCall) <- c("n", "b", "g", "c", "sim", "n_hat", "cv_hat_within", 
+                   "cv_hat_between", "kBET_rate", "kBET_pVal", "batch_corrs", 
+                   "edgeR_sum", "scDD_pool_ks", "DESeq2_sum", "consensus_edgeR", 
+                   "consensus_DESeq2")
+names(AUC) <- c("method", "AUC", "type", "n", "b", "g", "c", "sim", "n_hat", 
+                "cv_hat_within", "cv_hat_between", "kBET_rate", "kBET_pVal", 
+                "batch_corrs")
+names(FDR) <- c("method", "trueFDR", "predFDR", "type", "n", "b", "g", "c", 
+                "sim", "n_hat", "cv_hat_within", "cv_hat_between", "kBET_rate", 
+                "kBET_pVal", "batch_corrs")
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+***
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+# Quality Control
+
+**Missing Simulations**
+
+In these cases the automatic cell quality control was too stringent and
+of at least one batch all cells were removed.
+This is why the down-stream scripts did not produce result files.
+
+```{r}
+table(!complete.cases(estimates))
+```
+
+In general NaN rows are removed from all tables.
+
+```{r}
+estimates <- na.omit(estimates)
+noCall <- na.omit(noCall)
+AUC <- na.omit(AUC)
+FDR <- na.omit(FDR)
+```
+
+
+**No Calls**
+
+If a method for some reason produced NaN p values for some data points
+it cannot be compared appropriately to the other methods, 
+which created p values for all data points.
+The ratio of these NaNs was captured in `noCall`.
+
+```{r}
+DEmethods <- c("edgeR_sum", "scDD_pool_ks", "DESeq2_sum", "consensus_edgeR", 
+               "consensus_DESeq2")
+summary(noCall[, DEmethods, with = FALSE])
+```
+
+Methods which use DESeq2 produced many NaNs.
+Below we tried to identify what parameter causes this problem.
+
+```{r}
+dt <- melt(noCall, 1:10, DEmethods, "method", "Prop NaNs")
+ggplot(dt) +
+  geom_boxplot(aes(x = method, y = `Prop NaNs`, color = as.factor(n))) +
+  theme_bw() 
+ggplot(dt) +
+  geom_boxplot(aes(x = method, y = `Prop NaNs`, color = as.factor(b))) +
+  theme_bw()
+ggplot(dt) +
+  geom_boxplot(aes(x = method, y = `Prop NaNs`, color = as.factor(g))) +
+  theme_bw() 
+ggplot(dt) +
+  geom_boxplot(aes(x = method, y = `Prop NaNs`, color = as.factor(c))) +
+  theme_bw() 
+```
+
+Generally, DESeq2 and scDD produce NaNs partially dependent on $g$ and $c$
+as it seems.
+Sometimes DESeq2 based methods produced more than 10\% NaNs.
+EdgeR produces no NaNs.
+DESeq2 was supposed to be an alternative to edgeR here but if it does not turn
+out to be substantially more powerful, it would be safer to use edgeR.
+Naturally, the consensus methods inherit NaNs form their 
+base methods.
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+***
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+# Feature Distribution
+
+Features $\hat n$, $\hat{cv}_{within}$, $\hat{cv}_{between}$,
+$kBET$, and $batch_{corrs}$ were estimated from the datasets.
+They should be used to predict the loss of FDR control for a given
+method at a given predicted FDR.
+
+```{r}
+feats <- c("n_hat", "cv_hat_within", "cv_hat_between", "kBET_rate", "kBET_pVal", 
+           "batch_corrs")
+dt <- melt(estimates, 1:5, feats, "feature", "value")
+ggplot(dt) +
+  geom_histogram(aes(x = value), bins = 30) +
+  facet_wrap(~ feature, scales = "free") +
+  theme_bw()
+```
+
+Feature $kBET_pVal$ does not seem to be particularly useful here.
+
+```{r}
+table(estimates$kBET_pVal == 0)
+```
+
+
+**Correlations**
+
+```{r}
+panel.cor <- function(x, y, digits = 2, cex.cor, ...) {
+  usr <- par("usr"); on.exit(par(usr))
+  par(usr = c(0, 1, 0, 1))
+  m <- cbind(x, y)
+  m <- m[complete.cases(m), ]
+  r <- cor(m[, 1], m[, 2])
+  txt <- format(c(r, 0.123456789), digits = digits)[1]
+  txt <- paste("r= ", txt, sep = "")
+  text(0.5, 0.5, txt)
+}
+pairs(
+  estimates[, feats, with = FALSE], 
+  pch = 20,
+  cex = 0.5,
+  lower.panel = panel.cor
+)
+```
+
+There is strong linear correlation between $\hat{cv}_{within}$ and
+$batch_{corrs}$.
+Other than that one can see non linear dependencies between features in general.
+
+
+**Dependence to Parameter**
+
+The correlation coefficients of parameters together with features is shown
+below as heatmap.
+
+```{r}
+m <- cor(estimates)
+corrplot(m, method = "color", order = "hclust")
+```
+
+Obviously $n$ and $\hat n$ are correlated.
+Then, $\hat{cv}_{between}$ and $batch_{corrs}$ are correlated to $b$,
+and slightly to $g$.
+So these features seem to represent the respective parameters quite well.
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+***
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+## Target Variable
+
+## FDR Control
+
+The main objective here is to regress the loss of FDR control.
+We define this as the difference between true and predicted FDR, $D_{FDR}$.
+
+```{r, results='hide'}
+FDR[, D_FDR := trueFDR - predFDR]
+```
+
+These were measured at different distinct predicted FDRs for all methods.
+For $D_{FDR}$ we only look at the full dataset at first 
+(including all types of differential distribution).
+This is easier to interpret.
+Their distributions are shown below.
+
+```{r}
+ggplot(FDR[type == "full", ]) +
+  geom_histogram(aes(x = D_FDR), bins = 30) +
+  facet_grid(method ~ predFDR) +
+  theme_bw()
+```
+
+1. DESeq2 and edgeR robustly hold FDR control. edgeR seems to be slightly 
+better.
+
+2. Distributions suggest that the consensus methods behave like scDD
+in terms of FDR control.
+This would make sense, since it is the more promiscuous method.
+
+3. FDR control is better at low predicted FDR values.
+This is something we have also seen in the initial benchmarking
+
+
+
+
+
+## AUC
+
+After the FDR control can be predicted, the task would be to chose the 
+most powerful method.
+Power is here defined as AUC.
+Their distributions are shown below.
+Here, the distinction of different types of differential expression can
+help the interpretation.
+
+```{r}
+ggplot(AUC) +
+  geom_histogram(aes(x = AUC), bins = 30) +
+  facet_grid(method ~ type) +
+  theme_bw()
+```
+
+On the full dataset method which use scDD are clearly better here.
+This is due to the fact that they can identify differential shapes.
+This is why we want to predict, when scDD is reliable.
+
+
+
+
+
+
+
+
+***
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+# FDR Control
+
+## Joint Distribution
+
+Below I vizualize the joint distributions using PCA.
+The target variable is mapped to color and not included in the decomposition.
+The original variable values are given in the tooltips (hover over a point).
+
+```{r}
+plotPCA <- function(data, svd, target, main) {
+  df <- as.data.frame(svd$x)
+  df <- cbind(df, data)
+  df$col <- colorize(df[[target]])
+  x <- names(data)
+  y <- sprintf("{point.%s:.3f}", x)
+  ttip <- tooltip_table(x, y)
+  hchart(df, "scatter", hcaes(PC1, PC2, color = col)) %>%
+    hc_tooltip(useHTML = TRUE, headerFormat = "", pointFormat = ttip) %>%
+    hc_title(text = main) %>% 
+    hc_size(height = 800)
+}
+```
+
+Here, $D_{FDR}$ is mapped to color.
+Feature $kBET_{pVal}$ is excluded since it mostly consists of zeros.
+
+```{r}
+feats <- feats[-5]
+```
+
+
+**edgeR**
+
+```{r, fig.height=10, fig.width=10}
+dt <- FDR[type == "full" & method == "edgeR_sum", 
+          c("D_FDR", feats), with = FALSE]
+(dtSVD <- prcomp(dt[, !"D_FDR"], scale. = TRUE, center = TRUE))
+plotPCA(dt, dtSVD, "D_FDR", "edgeR FDR control")
+```
+
+**scDD**
+
+```{r, fig.height=10, fig.width=10}
+dt <- FDR[type == "full" & method == "scDD_pool_ks", 
+          c("D_FDR", feats), with = FALSE]
+(dtSVD <- prcomp(dt[, !"D_FDR"], scale. = TRUE, center = TRUE))
+plotPCA(dt, dtSVD, "D_FDR", "scDD FDR control")
+```
+
+Most variance is explained by $\hat{cv}_{between}$ and $batch_{corrs}$
+(which are highly correlated).
+After these come $\hat{cv}_{within}$, $\hat n$ and $kBET_{rate}$.
+
+## Partial Dependence
+
+Below the dependence of the target variable to features is shown.
+
+```{r}
+ScatterDensity <- function(x, y, xl, yl = "D_FDR") {
+  data <- data.frame(x = x, y = y)
+  arr <- densCols(data$y, data$x, 
+                  colramp = colorRampPalette(c("black", "white")))
+  data$dens <- col2rgb(arr)[1, ] + 1L
+  cols <-  colorRampPalette(c("#000099", "#00FEFF", "#45FE4F", "#FCFF00", 
+                              "#FF9400", "#FF3100"))(256)
+  data$col <- cols[data$dens]
+  plot(y ~ x, data = data[order(data$dens), ], xlab = xl, ylab = yl,
+       pch = 20, col = col, cex = 0.3, bty = "l")
+}
+```
+
+Point density is mapped to color.
+
+**edgeR**
+
+```{r, fig.height=12}
+dt <- FDR[type == "full" & method == "edgeR_sum", ]
+par(mfrow = c(3, 2))
+ScatterDensity(dt$n_hat, dt$D_FDR, "n_hat")
+ScatterDensity(dt$cv_hat_within, dt$D_FDR, "cv_hat_within")
+ScatterDensity(dt$cv_hat_between, dt$D_FDR, "cv_hat_between")
+ScatterDensity(dt$kBET_rate, dt$D_FDR, "kBET_rate")
+ScatterDensity(dt$batch_corrs, dt$D_FDR, "batch_corrs")
+```
+
+
+**scDD**
+
+```{r, fig.height=12}
+dt <- FDR[type == "full" & method == "scDD_pool_ks", ]
+par(mfrow = c(3, 2))
+ScatterDensity(dt$n_hat, dt$D_FDR, "n_hat")
+ScatterDensity(dt$cv_hat_within, dt$D_FDR, "cv_hat_within")
+ScatterDensity(dt$cv_hat_between, dt$D_FDR, "cv_hat_between")
+ScatterDensity(dt$kBET_rate, dt$D_FDR, "kBET_rate")
+ScatterDensity(dt$batch_corrs, dt$D_FDR, "batch_corrs")
+```
+
+
+
+
+
+
+
+
+
+***
+
+
+
+
+
+
+
+
+
+
+
+
+# Save
+
+## Write Objects
+
+Final save of main objects.
+
+```{r}
+saveRDS(AUC, "AUC.rds")
+saveRDS(FDR, "FDR.rds")
+saveRDS(noCall, "noCall.rds")
+```
+
+
+## SessionInfo
+
+```{r}
+sessionInfo()
+```
+

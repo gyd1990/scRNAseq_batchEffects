@@ -1,0 +1,582 @@
+---
+title: "Batch Effect Exploration"
+subtitle: "Modeling FDR Control of scDD"
+author: "Marc Schwering"
+output:
+  html_document:
+    number_sections: true
+    toc: true
+    toc_depth: 2
+    fig_width: 10
+    fig_height: 7
+    theme: cosmo
+---
+
+
+
+
+# Introduction
+
+In this script I try to predict the loss of FDR for scDD using pooled cells
+with Kolmogorov-Smirnov test.
+
+## Load
+
+First, libraries are loaded.
+
+```{r, message=FALSE, results='hide'}
+library(ggplot2) # plotting
+library(data.table) # database-like tables
+library(earth) # MARS
+library(mgcv) # GAM
+library(xgboost) # gradient boosting
+library(scatterplot3d) # 3d plots
+```
+
+Objects were prepared in the pre-processing step and are loaded.
+
+```{r}
+AUC <- readRDS("AUC.rds")
+FDR <- readRDS("FDR.rds")
+noCall <- readRDS("noCall.rds")
+```
+
+## Split Data
+
+1/3 split into train and test.
+The training set will be used for model fitting and evaluation
+while the test set will be used for prediction error estimation.
+
+```{r}
+FDR <- FDR[method == "scDD_pool_ks" & type == "full", ]
+set.seed(42)
+split <- sample(1:3, nrow(FDR), replace = TRUE)
+Xtrain <- FDR[split %in% 1:2, !"D_FDR"]
+Xtest <- FDR[split == 3, !"D_FDR"]
+Ytrain <- FDR[split %in% 1:2, D_FDR]
+Ytest <- FDR[split == 3, D_FDR]
+```
+
+Predictor variables.
+
+```{r}
+feats <- c("n_hat", "cv_hat_within", "cv_hat_between", 
+           "kBET_rate", "batch_corrs")
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+***
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+# Training
+
+## MARS
+
+A Multivariate  Adaptive Regression Splines (MARS) model is fit to the data.
+As there are not too many variables and the dataset is not so big,
+an exhaustive term selection is done during the pruning method and repeated
+cross validation is used to estimate R squared.
+The method is forced to stop during the forward pass if the estimated R squared
+does not increase by 0.001. 
+Interaction terms are allowed if the respective first degree terms are already
+in the model.
+
+```{r, results='hide'}
+fit <- earth(Xtrain[, feats, with = FALSE], Ytrain,
+             degree = 2, nk = 100, thresh = 0.001,
+             pmethod = "exhaustive", nfold = 5, ncross = 10)
+```
+
+```{r}
+summary(fit)
+```
+
+**Reduced**
+
+Next I try to reduce the model by removing features.
+I do this in a backwards selection fashion.
+Below is the model that yielded a cross validated R squared
+within 1 standard deviation of the full model.
+
+```{r, results='hide'}
+fit2 <- earth(Xtrain[, feats[-4], with = FALSE], Ytrain,
+             degree = 2, nk = 100, thresh = 0.001,
+             pmethod = "exhaustive", nfold = 5, ncross = 10)
+```
+
+```{r}
+summary(fit2)
+```
+
+The reduced model actually has a higher cross validated R squared.
+$kBET_{rate}$ was removed from the set of features.
+
+The model included interaction terms $\hat n * \hat{cv}_{between}$,
+$\hat n * \hat{cv}_{within}$, $\hat n * batch_{corrs}$, 
+$\hat{cv}_{between} *batch_{corrs}$, and
+$\hat{cv}_{between} * \hat{cv}_{within}$.
+Though $\hat{cv}_{between} *batch_{corrs}$ seems questionable with coefficients
+over 100; These terms are highly correlated.
+
+In a third model I want to exclude these questionable interactions with the 
+function below.
+
+```{r}
+allowed <- function(degree, pred, parents, namesx) {
+  if (degree < 2) return(TRUE)
+  idx1 <- which(namesx == "cv_hat_between")
+  idx2 <- which(namesx == "batch_corrs")
+  if ((pred == idx1 && parents[idx2]) || (pred == idx2 && parents[idx1])) {
+    return(FALSE)
+  }
+  return(TRUE)
+}
+```
+
+```{r, results='hide'}
+fit3 <- earth(Xtrain[, feats[-4], with = FALSE], Ytrain, 
+             degree = 2, nk = 100, thresh = 0.001, allowed = allowed,
+             pmethod = "exhaustive", nfold = 5, ncross = 10)
+```
+
+```{r}
+summary(fit3)
+```
+
+The cross validated error is still within 1 standard deviation of the best
+model and the rediculously high coefficients are gone.
+
+**Final Model**
+
+The last fit is used as final model.
+
+```{r}
+mars.mod <- fit3
+plot(mars.mod)
+```
+
+Most residuals are below 0.1, which would be 10% error in the prediction 
+of FDR control loss.
+Unfortunately, most values are around 0 and 1, and the values in between
+are predicted quite quite bad.
+
+Partial dependency plots of the mdoel are shown below.
+
+```{r, message=FALSE, warning=FALSE}
+plotmo(mars.mod, pmethod = "partdep", nrug = "density",
+       pt.col = 1, smooth.col = 2, ndiscrete = 0)
+```
+
+
+
+
+
+
+
+
+
+
+
+
+## GAM
+
+Next, I try to fit a generalized additive model (gam) to the data.
+I will use the `mgcv` package from Simon Wood for this.
+I hope to decrease the standard error furthermore.
+
+My strategy here is a backwards selection.
+I started with a full model with a maximum degree of 2 using 
+thin plate regression splines for single terms and cubic regression spline
+tensor products for interaction terms.
+The arbitrary default values for `k` (dimensions of the basis)
+were used.
+Parameter estimation is done via *Maximum Likelihood* as recommended in the
+documentation (for backwards selection).
+In the model below I already deleted all terms which where not significant.
+(below 5\%)
+
+```{r}
+dt <- cbind(Xtrain, Ytrain)
+names(dt)[ncol(dt)] <- "D_FDR"
+fit <- gam(
+  D_FDR ~ 
+    s(n_hat) +
+    s(cv_hat_within) +
+    s(cv_hat_between) +
+    s(batch_corrs) +
+    ti(n_hat, cv_hat_between) +
+    ti(n_hat, batch_corrs) +
+    ti(cv_hat_within, batch_corrs) +
+    ti(cv_hat_between, batch_corrs),
+  data = dt,
+  method = "ML"
+)
+summary(fit)
+```
+
+The plots and the statistic below shows that there is still a lot of structure
+left which is captured by the model.
+
+```{r}
+par(mfrow = c(2, 2))
+gam.check(fit)
+```
+
+Increasing `k` for interaction terms helped only a little but also substantially
+increased the fitting time.
+
+**Three-way Interaction**
+
+Next, I tried out adding an interaction term for 
+$\hat n * \hat{cv}_{within} * batch_{corrs}$.
+
+```{r}
+fit2 <- gam(
+  D_FDR ~ 
+    s(n_hat) +
+    s(cv_hat_within) +
+    s(cv_hat_between) +
+    s(batch_corrs) +
+    ti(n_hat, cv_hat_between) +
+    ti(n_hat, batch_corrs) +
+    ti(cv_hat_within, batch_corrs) +
+    ti(cv_hat_between, batch_corrs) +
+    ti(n_hat, cv_hat_within, batch_corrs),
+  data = dt,
+  method = "ML"
+)
+summary(fit2)
+```
+
+The model above can be reduced by using a full tensor product of the
+3-way interaction term.
+I did this below, which revealed other unsignificant terms.
+The final model is shown below.
+
+```{r}
+fit3 <- gam(
+  D_FDR ~ 
+    ti(n_hat, cv_hat_between) +
+    ti(cv_hat_between, batch_corrs) +
+    te(n_hat, cv_hat_within, batch_corrs),
+  data = dt,
+  method = "ML"
+)
+summary(fit3)
+```
+
+The statistics shown below still indicates that there is some unexplained
+structure left.
+However, increasing `k` merely helped, while fitting time exploded.
+
+```{r}
+par(mfrow = c(2, 2))
+gam.check(fit3)
+```
+
+**Final Model**
+
+As suggested in the `mgcv` vignette I will use the AIC for model selection.
+
+```{r}
+AIC(fit, fit2, fit3)
+```
+
+Thereafter, the reduced model using the 3-way interaction term will be used.
+A partial dependency plot is shown below.
+
+```{r, message=FALSE, warning=FALSE}
+gam.mod <- fit3
+plotmo(gam.mod, pmethod = "partdep", nrug = "density",
+       pt.col = 1, smooth.col = 2, ndiscrete = 0)
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+## xgboost
+
+Finally, I want to try out a quite powerful method which creates an ensemble
+of trees.
+Here, regression trees are iteratively fitted to minimize the RMSE 
+using stochastic gradient boosting.
+Trees are quite flexible with any kind of data and their ensemble can be
+very accurate.
+Overfitting is avoided by subsampling and explicit regularization.
+I will use the `xgboost` implementation.
+
+```{r}
+dtrain <- xgb.DMatrix(
+  data = as.matrix(Xtrain[, feats, with = FALSE]), 
+  label = Ytrain
+)
+```
+
+**Parameter Tuning**
+
+For hyper parameter estimation I will create a function that iteratively
+trains a model with different hyper parameter combinations.
+The performance is monitored using cross validation.
+Theoretically, up to 100k trees can be built per model, but I added an early
+stopping condition which will terminate the process if for 1000 iterations
+the RMSE did not decrease.
+The model with the lowest cross validated mean RMSE will be noted for each
+parameter combination.
+
+```{r}
+train.grid <- function(train, pars, n = 100000, objFun = NULL, nstop = 1000) {
+  N <- nrow(pars)
+  rmse <- data.frame(iter = integer(N), mean = numeric(N), sd = numeric(N))
+  for (i in seq_len(N)) {
+    fit <- xgb.cv(params = lapply(pars, function(x) x[i]), data = train, 
+                  nrounds = n, nfold = 5, obj = objFun, 
+                  early_stopping_rounds = nstop, nthread = 4)
+    dt <- fit$evaluation_log
+    idx <- which.min(dt$test_rmse_mean)
+    rmse$iter[i] <- idx
+    rmse$mean[i] <- dt$test_rmse_mean[idx]  
+    rmse$sd[i] <- dt$test_rmse_std[idx] 
+  }
+  return(rmse)
+}
+```
+
+Initially, only the most influencial parameters will be tested in a
+random search.
+These are the parameters which mainly define how complex each tree can grow:
+minimum RMSE icnrease per partition, maximum number of partitions,
+minimum size per partition.
+Other hyper parameters are set to reasonable default values.
+
+```{r}
+set.seed(42)
+pars.grid1 <- expand.grid(
+  eta = 0.01, # learning rate
+  gamma = runif(5, max = .1), # minimum RMSE increase for partiion
+  max_depth = sample(1:12, 5), # maximum partiions
+  min_child_weight = sample(1:(nrow(dtrain) / 10), 5), # minimum partition
+  alpha = 0, # L1 regularization
+  subsample = .5, # row subsampling
+  colsample_bytree = .5 # column subsampling
+)
+```
+
+```{r grid1, results='hide'}
+res <- train.grid(dtrain, pars.grid1)
+```
+
+Below is the parameter combination with the best cross validated mean RMSE
+and a 3d plot of the joint distribution of hyper parameters and mean RMSE.
+
+```{r}
+rmse1 <- setDT(cbind(res, pars.grid1))
+(best1 <- rmse1[which.min(mean), ])
+scatterplot3d(rmse1$min_child_weight, rmse1$gamma, rmse1$mean, 
+              color = rmse1$max_depth, angle = 60, pch = 20, type = "h")
+md <- sort(unique(rmse1$max_depth))
+legend("topleft", title = "max_depth", bty = "n", legend = md, fill = md)
+```
+
+Now regularization hyper parameters are tested: 
+Lasso regularization for weights, row subsampling and 
+column (feature) subsampling for each tree.
+
+```{r}
+set.seed(42)
+pars.grid2 <- expand.grid(
+  eta = 0.01, # learning rate
+  gamma = best1$gamma, # minimum RMSE increase for partiion
+  max_depth = best1$max_depth, # maximum partiions
+  min_child_weight = best1$min_child_weight, # minimum partition
+  alpha = runif(5, max = .5), # L1 regularization
+  subsample = runif(5, min = .1, max = .5), # row subsampling
+  colsample_bytree = runif(5, min = .1, max = .5) # column subsampling
+)
+```
+
+```{r grid2, results='hide'}
+res <- train.grid(dtrain, pars.grid2)
+```
+
+```{r}
+rmse2 <- setDT(cbind(res, pars.grid2))
+(best2 <- rmse2[which.min(mean), ])
+```
+
+The final best combination of hyper parameters is...
+
+```{r}
+rmse <- rbind(rmse1, rmse2)
+(best <- rmse[which.min(mean), ])
+```
+
+Eventually, one can increase the performance by making the model bigger,
+i.e. reducing the learning rate and increasing the number of iterations.
+I have tried that by decreasing $\eta$ to 0.001 or 0.05 while increasing the
+maximum number of iterations to 100k and relaxing the early stopping to
+10k.
+However, validation RMSE improvements only start near 100k trees per model.
+I decided to go with the much lighter model with nearly the same performance.
+
+```{r, results='hide'}
+parsl <- list(
+  eta = 0.01, # learning rate
+  gamma = best$gamma, # minimum RMSE increase for partiion
+  max_depth = best$max_depth, # maximum partiions
+  min_child_weight = best$min_child_weight, # minimum partition
+  alpha = best$alpha, # L1 regularization
+  subsample = best$subsample, # row subsampling
+  colsample_bytree = best$colsample_bytree # column subsampling
+)
+```
+
+The final model is fitted below.
+
+```{r}
+fit <- xgb.train(params = parsl, data = dtrain, nrounds = best$iter, nfold = 5)
+```
+
+Below you can see a ranking of feature importance.
+It is based on the number of occurences and their individual impacts of
+a feature in partitions of the tree ensemble.
+
+```{r}
+dt <- xgb.importance(colnames(dtrain), fit)
+xgb.plot.importance(dt)
+```
+
+**Reduced Model**
+
+Since $kBET_{rate}$ has the lowest score, I will remove it.
+Feature, $\hat_{cv}_{between}$ has a high score but it is highly correlated with
+$batch_{corrs}$.
+It might be ok to remove it as well.
+
+```{r}
+dtrain <- xgb.DMatrix(
+  data = as.matrix(Xtrain[, feats[-4], with = FALSE]), 
+  label = Ytrain
+)
+```
+
+I will use a hyper parameter tuning procedure as above.
+
+```{r}
+set.seed(42)
+pars.grid1 <- expand.grid(
+  eta = 0.01, # learning rate
+  gamma = runif(5, max = .1), # minimum RMSE increase for partiion
+  max_depth = sample(1:12, 5), # maximum partiions
+  min_child_weight = sample(1:(nrow(dtrain) / 10), 5), # minimum partition
+  alpha = 0, # L1 regularization
+  subsample = .5, # row subsampling
+  colsample_bytree = .5 # column subsampling
+)
+```
+
+```{r grid1, results='hide'}
+res <- train.grid(dtrain, pars.grid1)
+```
+
+Below is the parameter combination with the best cross validated mean RMSE
+and a 3d plot of the joint distribution of hyper parameters and mean RMSE.
+
+```{r}
+rmse1 <- setDT(cbind(res, pars.grid1))
+(best1 <- rmse1[which.min(mean), ])
+scatterplot3d(rmse1$min_child_weight, rmse1$gamma, rmse1$mean, 
+              color = rmse1$max_depth, angle = 60, pch = 20, type = "h")
+md <- sort(unique(rmse1$max_depth))
+legend("topleft", title = "max_depth", bty = "n", legend = md, fill = md)
+```
+
+Now regularization hyper parameters are tested: 
+Lasso regularization for weights, row subsampling and 
+column (feature) subsampling for each tree.
+
+```{r}
+set.seed(42)
+pars.grid2 <- expand.grid(
+  eta = 0.01, # learning rate
+  gamma = best1$gamma, # minimum RMSE increase for partiion
+  max_depth = best1$max_depth, # maximum partiions
+  min_child_weight = best1$min_child_weight, # minimum partition
+  alpha = runif(5, max = .5), # L1 regularization
+  subsample = runif(5, min = .1, max = .5), # row subsampling
+  colsample_bytree = runif(3, min = .3, max = .5) # column subsampling
+)
+```
+
+```{r grid2, results='hide'}
+res <- train.grid(dtrain, pars.grid2)
+```
+
+```{r}
+rmse2 <- setDT(cbind(res, pars.grid2))
+(best2 <- rmse2[which.min(mean), ])
+```
+
+
+```{r}
+rmse <- rbind(rmse1, rmse2)
+(best.red <- rmse[which.min(mean), ])
+best
+```
+
+
+
+
+***
+
+
+
+
+
+
+
+
+
+
+# Session Info
+
+```{r}
+sessionInfo()
+```
+
+

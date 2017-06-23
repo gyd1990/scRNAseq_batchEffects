@@ -1,0 +1,349 @@
+---
+title: "Compare Methods"
+author: "Marc Schwering"
+output:
+  html_document:
+    number_sections: true
+    toc: true
+    toc_depth: 2
+    fig_width: 10
+    fig_height: 7
+    theme: cosmo
+---
+
+# Load
+
+Load libraries and objects.
+
+```{r, warning=FALSE, message=FALSE, results='hide'}
+library(scater)
+library(data.table)
+sce <- readRDS("intermediate_data/normed.rds")
+resVec <- readRDS("intermediate_data/DE.rds")
+noCall <- readRDS("results/noCall.rds")
+```
+
+
+
+
+# Overall Prediction Power
+
+To compare prediction power of each method recall, fallout, 
+and the accuracy of the estimated false discovery rate (FDR) are used.
+All results are stored in a vector of data tables.
+
+However, before I compare all methods I have to do a quality control.
+Some methods failed to produce p values for vertain genes.
+So, they only predicted a subset of all genes.
+This can bias the results.
+Here, I throw out every method which failed on more than 5% of all genes.
+
+```{r}
+for (i in seq_along(noCall)) {
+  if (noCall[[i]] >= 0.05 * nrow(sce)) {
+    print(paste("Sorry", names(noCall)[i]))
+    resVec[[names(noCall)[i]]] <- NULL
+  }
+}
+```
+
+The following function creates a spectrum of 1000 confusion tables given a
+predictors ranks and the true labels.
+The confusion tables are stored in a matrix where each row represents a 
+confusion table for a certain rank.
+The according 1000 predicted FDRs are also returned.
+
+```{r}
+confuse <- function(ranks, labels, FDRs, n = 1000) {
+  # prepare table
+  stopifnot(length(ranks) == length(labels) & length(ranks) == length(FDRs))
+  dt <- data.table(rank = ranks, label = labels, FDR = FDRs)
+  steps <- seq.int(2, nrow(dt), length.out = n)
+  dt <- dt[order(rank)]
+  
+  # fill matrix with TPs, ...
+  m <- matrix(NA, n, 4, dimnames = list(steps, c("TP", "FP", "TN", "FN")))
+  for (s in seq_along(steps)) {
+    res <- dt[, .(TP = sum(rank < steps[s] & label != "random"), 
+                    FP = sum(rank < steps[s] & label == "random"), 
+                    TN = sum(rank >= steps[s] & label == "random"), 
+                    FN = sum(rank >= steps[s] & label != "random"))]
+    m[s, ] <- as.numeric(res[1, ])
+  }
+  return(list(confusionMatrix = m, predicted_FDR = dt[steps - 1, FDR]))
+}
+```
+
+This creates a list of ture and false positive, and true and false negative 
+counts for the whole spectrum of stringencies.
+In the following step, this function is applied on all results.
+Then recall, fallout, true FDR and predicted FDR is calculated for 
+the spectrum of stringencies.
+
+```{r}
+l <- lapply(names(resVec), function(m){
+  cm <- confuse(resVec[[m]]$rank, resVec[[m]]$label, resVec[[m]]$FDR)
+  data.table(
+    rec = cm[[1]][, 1] / (cm[[1]][, 1] + cm[[1]][, 4]),
+    fal = cm[[1]][, 2] / (cm[[1]][, 2] + cm[[1]][, 3]),
+    trueFDR = cm[[1]][, 2] / (cm[[1]][, 2] + cm[[1]][, 1]),
+    predFDR = cm[[2]],
+    method = m
+  )
+})
+roc <- do.call(rbind, l)
+```
+
+## ROC Curve
+
+A reasonable metric to compare the overall prediction power is the ROC curve.
+The curves for different methods are shown below.
+
+```{r}
+ggplot(roc) +
+  geom_abline(slope = 1, intercept = 0, color = "black", alpha = 0.3, linetype = 2) +
+  geom_path(aes(x = fal, y = rec, col = method)) +
+  scale_x_continuous(limits = c(0, 1)) +
+  scale_y_continuous(limits = c(0, 1)) +
+  theme_bw() +
+  ggtitle("ROC")
+```
+
+Areas under the curve can be calculated as a measure of prediction power.
+AUCs are stored in a vector.
+
+```{r}
+(aucs <- roc[, .(AUC = flux::auc(fal, rec)), by = method])
+aucs$type <- "full"
+AUCs <- list(full = aucs)
+```
+
+
+## FDR Control
+
+Another interesting metric would be the accuracy of predicted FDR.
+To visualize this predicted over true FDR is shown below.
+
+```{r}
+ggplot(roc) + 
+  geom_abline(slope = 1, intercept = 0, color = "black", alpha = 0.3, linetype = 2) +
+  geom_path(aes(x = trueFDR, y = predFDR, col = method)) +
+  scale_x_continuous(limits = c(0, 1)) +
+  scale_y_continuous(limits = c(0, 1)) +
+  theme_bw() +
+  ggtitle("FDR")
+```
+
+To visualize the impact of inaccurate FDR predictions true FDRs for different
+FDRs for each method are shown below.
+The red line represents the desired FDR.
+
+```{r}
+l <- list(
+  roc[, .(trueFDR = trueFDR[which.min(abs(predFDR - 0.01))]), by = method],
+  roc[, .(trueFDR = trueFDR[which.min(abs(predFDR - 0.05))]), by = method],
+  roc[, .(trueFDR = trueFDR[which.min(abs(predFDR - 0.10))]), by = method]
+)
+dt <- do.call(rbind, l)
+(dt$predFDR <- rep(c(0.01, 0.05, 0.10), each = 5))
+dt$type <- "full"
+FDRs <- list(full = dt)
+```
+
+
+# Differential Shape Prediction Power
+
+Of particular interest here is how good can these methods identify 
+differential shapes.
+The above computation is repeated, but this time all differentially 
+distributed genes expect for only differential shapes are removed.
+
+```{r}
+l <- lapply(names(resVec), function(m){
+  res <- resVec[[m]][label %in% c("random", "shape"), ]
+  cm <- confuse(res$rank, res$label, res$FDR)
+  data.table(
+    rec = cm[[1]][, 1] / (cm[[1]][, 1] + cm[[1]][, 4]),
+    fal = cm[[1]][, 2] / (cm[[1]][, 2] + cm[[1]][, 3]),
+    trueFDR = cm[[1]][, 2] / (cm[[1]][, 2] + cm[[1]][, 1]),
+    predFDR = cm[[2]],
+    method = m
+  )
+})
+roc <- do.call(rbind, l)
+```
+
+## ROC Curve
+
+ROC curve are compared for predicting differential shapes only.
+
+```{r}
+ggplot(roc) +
+  geom_abline(slope = 1, intercept = 0, color = "black", alpha = 0.3, linetype = 2) +
+  geom_path(aes(x = fal, y = rec, col = method)) +
+  scale_x_continuous(limits = c(0, 1)) +
+  scale_y_continuous(limits = c(0, 1)) +
+  theme_bw() +
+  ggtitle("ROC -- DS")
+```
+
+Areas under the curve can be calculated as a measure of prediction power.
+
+```{r}
+(aucs <- roc[, .(AUC = flux::auc(fal, rec)), by = method])
+aucs$type <- "shape"
+AUCs$shape <- aucs
+```
+
+## FDR Control
+
+Predicted and actual FDRs are gathered and saved.
+
+```{r}
+l <- list(
+  roc[, .(trueFDR = trueFDR[which.min(abs(predFDR - 0.01))]), by = method],
+  roc[, .(trueFDR = trueFDR[which.min(abs(predFDR - 0.05))]), by = method],
+  roc[, .(trueFDR = trueFDR[which.min(abs(predFDR - 0.10))]), by = method]
+)
+dt <- do.call(rbind, l)
+dt$predFDR <- rep(c(0.01, 0.05, 0.10), each = 5)
+dt$type <- "shape"
+FDRs$shape <- dt
+```
+
+
+
+# Differential Mean and Shape Prediction Power
+
+Here, the classical methods should work, however it would be interesting if they underpower the differential shape component.
+
+```{r}
+l <- lapply(names(resVec), function(m){
+  res <- resVec[[m]][label %in% c("random", "both_a", "both_b"), ]
+  cm <- confuse(res$rank, res$label, res$FDR)
+  data.table(
+    rec = cm[[1]][, 1] / (cm[[1]][, 1] + cm[[1]][, 4]),
+    fal = cm[[1]][, 2] / (cm[[1]][, 2] + cm[[1]][, 3]),
+    trueFDR = cm[[1]][, 2] / (cm[[1]][, 2] + cm[[1]][, 1]),
+    predFDR = cm[[2]],
+    method = m
+  )
+})
+roc <- do.call(rbind, l)
+```
+
+## ROC Curve
+
+ROC curve are compared for predicting differential shape and mean only.
+
+```{r}
+ggplot(roc) +
+  geom_abline(slope = 1, intercept = 0, color = "black", alpha = 0.3, linetype = 2) +
+  geom_path(aes(x = fal, y = rec, col = method)) +
+  scale_x_continuous(limits = c(0, 1)) +
+  scale_y_continuous(limits = c(0, 1)) +
+  theme_bw() +
+  ggtitle("ROC -- DB")
+```
+
+Areas under the curve can be calculated as a measure of prediction power.
+
+```{r}
+(aucs <- roc[, .(AUC = flux::auc(fal, rec)), by = method])
+aucs$type <- "both"
+AUCs$both <- aucs
+```
+
+## FDR Control
+
+Predicted and actual FDRs are gathered and saved.
+
+```{r}
+l <- list(
+  roc[, .(trueFDR = trueFDR[which.min(abs(predFDR - 0.01))]), by = method],
+  roc[, .(trueFDR = trueFDR[which.min(abs(predFDR - 0.05))]), by = method],
+  roc[, .(trueFDR = trueFDR[which.min(abs(predFDR - 0.10))]), by = method]
+)
+dt <- do.call(rbind, l)
+dt$predFDR <- rep(c(0.01, 0.05, 0.10), each = 5)
+dt$type <- "both"
+FDRs$both <- dt
+```
+
+
+
+
+# Differential Mean Prediction Power
+
+Finally, the classic situation: 
+detecting differential means.
+
+```{r}
+l <- lapply(names(resVec), function(m){
+  res <- resVec[[m]][label %in% c("random", "mean"), ]
+  cm <- confuse(res$rank, res$label, res$FDR)
+  data.table(
+    rec = cm[[1]][, 1] / (cm[[1]][, 1] + cm[[1]][, 4]),
+    fal = cm[[1]][, 2] / (cm[[1]][, 2] + cm[[1]][, 3]),
+    trueFDR = cm[[1]][, 2] / (cm[[1]][, 2] + cm[[1]][, 1]),
+    predFDR = cm[[2]],
+    method = m
+  )
+})
+roc <- do.call(rbind, l)
+```
+
+## ROC Curve
+
+ROC curve are compared for predicting differential mean only.
+
+```{r}
+ggplot(roc) +
+  geom_abline(slope = 1, intercept = 0, color = "black", alpha = 0.3, linetype = 2) +
+  geom_path(aes(x = fal, y = rec, col = method)) +
+  scale_x_continuous(limits = c(0, 1)) +
+  scale_y_continuous(limits = c(0, 1)) +
+  theme_bw() +
+  ggtitle("ROC -- DM")
+```
+
+Areas under the curve can be calculated as a measure of prediction power.
+
+```{r}
+(aucs <- roc[, .(AUC = flux::auc(fal, rec)), by = method])
+aucs$type <- "mean"
+AUCs$mean <- aucs
+```
+
+## FDR Control
+
+Predicted and actual FDRs are gathered and saved.
+
+```{r}
+l <- list(
+  roc[, .(trueFDR = trueFDR[which.min(abs(predFDR - 0.01))]), by = method],
+  roc[, .(trueFDR = trueFDR[which.min(abs(predFDR - 0.05))]), by = method],
+  roc[, .(trueFDR = trueFDR[which.min(abs(predFDR - 0.10))]), by = method]
+)
+dt <- do.call(rbind, l)
+dt$predFDR <- rep(c(0.01, 0.05, 0.10), each = 5)
+dt$type <- "mean"
+FDRs$mean <- dt
+```
+
+
+
+
+## Save
+
+Final save.
+
+```{r}
+FDRs <- do.call(rbind, FDRs)
+saveRDS(FDRs, "results/FDR.rds")
+AUCs <- do.call(rbind, AUCs)
+saveRDS(AUCs, "results/AUC.rds")
+```
+
+
+***

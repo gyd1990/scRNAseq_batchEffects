@@ -1,6 +1,6 @@
 # Initial Benchmarking
 
-Please find the code on [github](https://github.com/mRcSchwering/scRNAseq_batchEffects/tree/master/batchEffect_explo).
+Please find the code on [github](https://github.com/mRcSchwering/scRNAseq_batchEffects/tree/master/initial_benchmarking).
 Clone the repository.
 The code for this experiment is in *initial_benchmarking*.
 

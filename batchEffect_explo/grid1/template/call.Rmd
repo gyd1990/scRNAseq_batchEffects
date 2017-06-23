@@ -1,0 +1,333 @@
+---
+title: "Calling Differential Distributions"
+author: "Marc Schwering"
+output:
+  html_document:
+    number_sections: true
+    toc: true
+    toc_depth: 2
+    fig_width: 10
+    fig_height: 7
+    theme: cosmo
+---
+
+
+
+```{r optsSet, echo=FALSE, results="hide"}
+knitr::opts_chunk$set(echo = TRUE, message = FALSE, warning = FALSE , dpi = 400)
+options(digits = 2)
+```
+
+# Load
+
+Packages and functions are loaded, the sce object is laoded, 
+and variables are set.
+
+```{r, warning=FALSE, message=FALSE}
+grpID <- "group"
+btchID <- "batch"
+smplID <- "sample"
+
+library(scran)
+library(scater)
+library(ggplot2)
+library(data.table)
+library(edgeR)
+library(DESeq2)
+library(scDD)
+library(SummarizedExperiment)
+
+nproc <- 1
+param <- SnowParam(workers = nproc, type = "SOCK")
+
+sce <- readRDS("intermediate_data/normed.rds")
+```
+
+
+
+
+
+
+
+# Individual Methods
+
+The initial benchmarking revield 2 interesting methods.
+One was using edgeR
+([Robinson et al](https://academic.oup.com/bioinformatics/article-lookup/doi/10.1093/bioinformatics/btp616))
+on summed up scRNA-seq data as reported by
+[Lun et al](https://academic.oup.com/biostatistics/article/2970368/Overcoming-confounding-plate-effects-in).
+The results showed that this method is immune to confounding batch effetcs.
+However, it is not capable of capturing differences in the shape of
+distributions.
+
+The second method uses pooled scRNA-seq data (as usual)
+with scDD
+([Korthauer et al](https://genomebiology.biomedcentral.com/articles/10.1186/s13059-016-1077-y))
+using the Kolmogorov-Smirnov Test.
+This method was quite robust to batch effects and it is capable of capturing
+differences in the shape of distributions.
+It belonged to the most powerful methods (wrt AUC).
+However, if the batch effect is too high it loses FDR control.
+
+Then, I would like to try out the method proposed by *Lun et al* (above) but 
+using DESeq2 ([Love et al](https://genomebiology.biomedcentral.com/articles/10.1186/s13059-014-0550-8))
+instead of edgeR. 
+I guess the results are similar, but maybe there is an additional increase
+in prediction power or FDR control using DESeq2.
+
+These 3 methods will now be applied.
+Their results will be stored in a vector.
+In case $NaN$s are generated, 
+the proportion of these is also stored in a vector.
+
+```{r}
+resVec <- list()
+noCall <- list()
+```
+
+> I was also interested how the scran normalized data would perform when batches
+are summed up afterwards. I fitted a GLM to the data (tried out different
+family functions) and did a LR- and Wald-test on the coefficient (group):
+too weak (less than 500 overall p.vals < 0.05) and skewed p.val distribution.
+
+## edgeR
+
+Counts are summed up gene-wise across batches, a 
+`dge` object is created, and edgeR is used as usual.
+Results are tidied up and stored in vectors. 
+
+```{r}
+# summing up
+batches <- as.factor(sce[[btchID]])
+l <- lapply(levels(batches), function(i) {
+  rowSums(counts(sce)[, which(batches == i)])
+})
+m <- do.call("cbind", l)
+
+# run test
+groups <- rep(c("Group1", "Group2"), each = 3)
+dge <- DGEList(counts = m, group = groups)
+dge <- calcNormFactors(dge)
+design <- model.matrix(~ groups)
+dge <- estimateDisp(dge, design)
+fit <- glmFit(dge, design)
+lrt <- glmLRT(fit, coef = 2)
+
+# get results
+res <- topTags(lrt, n = Inf)$table
+res$gene <- as.numeric(
+  gsub("([A-Za-z]+)([0-9]+)", "\\2", rownames(res))
+)
+res$rank <- 1:nrow(res)
+res <- res[, -3:-1]
+names(res)[1] <- "pVal"
+res <- as.data.table(res)
+res <- res[order(res$gene), ]
+res$label <- fData(sce)$label
+
+# quick look at results
+summary(res$pVal)
+notOk <- sum(!complete.cases(res)) / nrow(res)
+res <- res[complete.cases(res), ]
+density(res$pVal)
+table(res$FDR < 0.01)
+res[, .(TP = sum(FDR < 0.01 & label != "random"), 
+        FP = sum(FDR < 0.01 & label == "random"), 
+        TN = sum(FDR >= 0.01 & label == "random"), 
+        FN = sum(FDR >= 0.01 & label != "random")), by = label]
+
+resVec$edgeR_sum <- res
+noCall$edgeR_sum <- notOk
+```
+
+
+## scDD
+
+Batch labels are ignored (i.e. pooling of batches),
+a `se` object is created and scDD is used with a
+Kolmogorov-Smirnov test.
+`scran` normalized expression values are used.
+These are already log2 normalized with a offset of 1.
+This transformation is reversed before using scDD.
+
+```{r}
+# run test
+groups <- sce[[grpID]]
+m <- exprs(sce)
+m[m < 0] <- 0
+m <- 2^m - 1
+se <- SummarizedExperiment(
+  assays = list("NormCounts" = m),
+  colData = data.frame(condition = groups)
+)
+se <- scDD(
+    se, 
+    prior_param = list(alpha = 0.01, mu0 = 0, s0 = 0.01, 
+                       a0 = 0.01, b0 = 0.01),
+    param = param,
+    permutations = 0,
+    testZeroes = FALSE
+)
+
+# get results
+res <- results(se)
+pVals <- res$nonzero.pvalue
+fdrs <- res$nonzero.pvalue.adj
+genes <- as.numeric(
+  gsub("([A-Za-z]+)([0-9]+)", "\\2", as.character(res$gene))
+)
+res <- data.table(
+  pVal = pVals, 
+  FDR = fdrs, 
+  gene = genes, 
+  rank = rank(pVals)
+)
+res <- res[order(res$gene), ]
+res$label <- fData(sce)$label
+
+# quick look at results
+summary(res$pVal)
+notOk <- sum(!complete.cases(res)) / nrow(res)
+res <- res[complete.cases(res), ]
+density(res$pVal)
+table(res$FDR < 0.01)
+res[, .(TP = sum(FDR < 0.01 & label != "random"), 
+        FP = sum(FDR < 0.01 & label == "random"), 
+        TN = sum(FDR >= 0.01 & label == "random"), 
+        FN = sum(FDR >= 0.01 & label != "random")), by = label]
+
+resVec$scDD_pool_ks <- res
+noCall$scDD_pool_ks <- notOk
+```
+
+
+## DESeq2
+
+Counts are summed up gene-wise across batches, a 
+`dge` object is created, and edgeR is used as usual.
+Results are tidied up and stored in vectors. 
+
+```{r}
+# summing up
+batches <- as.factor(sce[[btchID]])
+l <- lapply(levels(batches), function(i) {
+  rowSums(counts(sce)[, which(batches == i)])
+})
+m <- do.call("cbind", l)
+
+# run test
+groups <- rep(c("Group1", "Group2"), each = 3)
+dds <- DESeqDataSetFromMatrix(
+  countData = m,
+  colData = data.frame(group = groups),
+  design = ~ group
+)
+dds <- DESeq(dds)
+res <- DESeq2::results(dds)
+
+# get results
+res <- as.data.table(res@listData)
+res <- res[, !1:4]
+colnames(res)[1:2] <- c("pVal", "FDR")
+res$gene <- as.numeric(rownames(res))
+res$rank <- rank(res$pVal)
+res$label <- fData(sce)$label
+
+# quick look at results
+summary(res$pVal)
+notOk <- sum(!complete.cases(res)) / nrow(res)
+res <- res[complete.cases(res), ]
+density(res$pVal)
+table(res$FDR < 0.01)
+res[, .(TP = sum(FDR < 0.01 & label != "random"), 
+        FP = sum(FDR < 0.01 & label == "random"), 
+        TN = sum(FDR >= 0.01 & label == "random"), 
+        FN = sum(FDR >= 0.01 & label != "random")), by = label]
+
+resVec$DESeq2_sum <- res
+noCall$DESeq2_sum <- notOk
+```
+
+
+
+
+
+
+
+
+# Consensus Approaches
+
+Another idea was to use a consensus approach and take the union of 
+called genes of the above 2 methods.
+The idea was to combine scDDs ability to detect different shapes with edgeR's
+superb ability to detect different means.
+Initial tryouts showed an additional increase in prediction power.
+However, like scDD this method loses FDR-control if the batch effect 
+is too high.
+
+## edgeR
+
+The consensus approach calls all genes which are called by edgeR or scDD
+(or both).
+This is the same as taking the smallest FDR from either predictor.
+
+```{r}
+edge <- resVec$edgeR_sum
+scdd <- resVec$scDD_pool_ks
+edge <- edge[gene %in% scdd$gene, ]
+new <- data.table(
+  FDR = apply(cbind(scdd$FDR, edge$FDR), 1, min),
+  gene = edge$gene,
+  label = edge$label
+)
+new$rank <- rank(new$FDR)
+
+# quick look at results
+table(new$FDR < 0.01)
+new[, .(TP = sum(FDR < 0.01 & label != "random"), 
+        FP = sum(FDR < 0.01 & label == "random"), 
+        TN = sum(FDR >= 0.01 & label == "random"), 
+        FN = sum(FDR >= 0.01 & label != "random")), by = label]
+
+resVec$consensus_edgeR <- new
+noCall$consensus_edgeR <- noCall$scDD_pool_ks
+```
+
+## DESeq2
+
+The same thing can be done for DESeq2 as well.
+
+```{r}
+deseq <- resVec$DESeq2_sum
+scdd <- resVec$scDD_pool_ks
+deseq <- deseq[gene %in% scdd$gene, ]
+scdd <- scdd[gene %in% deseq$gene, ]
+new <- data.table(
+  FDR = apply(cbind(scdd$FDR, deseq$FDR), 1, min),
+  gene = deseq$gene,
+  label = deseq$label
+)
+new$rank <- rank(new$FDR)
+
+# quick look at results
+table(new$FDR < 0.01)
+new[, .(TP = sum(FDR < 0.01 & label != "random"), 
+        FP = sum(FDR < 0.01 & label == "random"), 
+        TN = sum(FDR >= 0.01 & label == "random"), 
+        FN = sum(FDR >= 0.01 & label != "random")), by = label]
+
+resVec$consensus_DESeq2 <- new
+noCall$consensus_DESeq2 <- noCall$scDD_pool_ks + noCall$DESeq2_sum
+```
+
+Final save.
+
+```{r}
+saveRDS(resVec, "intermediate_data/DE.rds")
+saveRDS(noCall, "results/noCall.rds")
+```
+
+
+
+
+***
