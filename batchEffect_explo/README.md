@@ -8,7 +8,7 @@ The code for this experiment is in *batchEffect_explo*.
     cd scRNAseq_batchEffects/batchEffect_explo/
 
 
-## Create Simulations
+## Reproduce Simulations
 
 For both grids (in subdirectories *grid1/*, *grid2/*) the python script
 *run_gridSearch.py* will create all simulations (768 for each grid).
@@ -42,7 +42,7 @@ and for edgeR using summed up cells.
     Rscript -e 'rmarkdown::render("model_edgeR.Rmd")'
 
 Some of the models require hyper parameter tuning,
-which is why the respective scripts might run over over 1 hour.
+which is why the respective scripts might run over 1 hour.
 Each of them will create a html report.
 
 **Packages**
