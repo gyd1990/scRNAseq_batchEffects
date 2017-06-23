@@ -99,7 +99,6 @@ def make(name, index):
     yml(name)
     opts = 'split_by = "chapter", config = list(toc = list(collapse = "section"))'
     cmd = 'bookdown::render_book("", bookdown::gitbook(%s))' % opts
-    #subprocess.call(["Rscript", "-e", cmd])
     with open(os.devnull, "w") as ouf:
         subprocess.call(["Rscript", "-e", cmd], stdout = ouf, stderr = ouf)
     cleanUp()

@@ -13,9 +13,8 @@ library(scran)
 library(scater)
 library(ggplot2)
 library(data.table)
-library(biomaRt)
 
-nproc <- parallel::detectCores() - 1
+nproc <- 35
 param <- SnowParam(workers = nproc, type = "SOCK")
 
 sce <- readRDS("intermediate_data/normed.rds")

@@ -1,0 +1,704 @@
+---
+title: "Results Summary"
+subtitle: "Initial Simulation"
+author: "Marc Schwering"
+output:
+  html_document:
+    number_sections: true
+    toc: true
+    toc_depth: 2
+    fig_width: 10
+    fig_height: 7
+    theme: cosmo
+---
+
+
+
+
+
+
+
+# Preparation
+
+Libraries are loaded.
+
+```{r}
+library(ggplot2)
+library(data.table)
+```
+
+*rds* files are loaded from different subdirectories.
+
+```{r}
+dirs <- paste0(rep(c("strong_dd", "weak_dd"), each = 2), 
+               c("", "_reducedBtchEffcts"))
+sims <- paste0("sim", 1:3)
+dirs <- apply(expand.grid(dirs, sims), 1, paste0, collapse = "/")
+res <- list()
+for (i in dirs) {
+  file <- try(readRDS(file.path(i, "intermediate_data", "res.rds")))
+  if (class(file) != "try-error")res[[i]] <- file
+}
+noCall <- list()
+for (i in dirs) {
+  file <- try(readRDS(file.path(i, "intermediate_data", "noCall.rds")))
+  if (class(file) != "try-error")noCall[[i]] <- file
+}
+```
+
+A table is created which contains information about the different 
+simulation settings.
+
+```{r}
+info <- data.table(
+  dir = names(res),
+  deltaDD = c(rep(rep(c("strongDD", "weakDD"), each = 2), 2), rep("weakDD", 2)),
+  btch = rep(c("strongEffect", "weakEffect"), 5),
+  sim = c(rep(1:2, each = 4), 3, 3)
+)
+```
+
+The following functions are used to create confusion matrices with information
+about FDRs from results table, and to create ROC data (precisiion/recall).
+
+```{r}
+confuse <- function(ranks, labels, FDRs, n = 1000) {
+  # prepare table
+  stopifnot(length(ranks) == length(labels) & length(ranks) == length(FDRs))
+  dt <- data.table(rank = ranks, label = labels, FDR = FDRs)
+  steps <- seq.int(2, nrow(dt), length.out = n)
+  dt <- dt[order(rank)]
+  
+  # fill matrix with TPs, ...
+  m <- matrix(NA, n, 4, dimnames = list(steps, c("TP", "FP", "TN", "FN")))
+  for( s in seq_along(steps) ){
+    res <- dt[, .(TP = sum(rank < steps[s] & label != "random"), 
+                    FP = sum(rank < steps[s] & label == "random"), 
+                    TN = sum(rank >= steps[s] & label == "random"), 
+                    FN = sum(rank >= steps[s] & label != "random"))]
+    m[s, ] <- as.numeric(res[1, ])
+  }
+  return(list(confusionMatrix = m, predicted_FDR = dt[steps - 1, FDR]))
+}
+
+getROC <- function(m, resVec, incl = NULL) {
+  if (!is.null(incl)) {
+    resVec[[m]] <- resVec[[m]][label %in% incl, ]
+  }
+  cm <- confuse(resVec[[m]]$rank, resVec[[m]]$label, resVec[[m]]$FDR)
+  dt <- data.table(
+    rec = cm[[1]][, 1] / (cm[[1]][, 1] + cm[[1]][, 4]),
+    fal = cm[[1]][, 2] / (cm[[1]][, 2] + cm[[1]][, 3]),
+    trueFDR = cm[[1]][, 2] / (cm[[1]][, 2] + cm[[1]][, 1]),
+    predFDR = cm[[2]],
+    method = m
+  )
+  return(dt)
+}
+```
+
+## Full
+
+For all simulations and all methods AUCs and FDR differences are computed
+regarding all kinds of differential distribution.
+
+```{r}
+rocs <- list()
+for (i in seq_along(res)) {
+  resVec <- res[[i]]
+  auc <- lapply(names(resVec), getROC, resVec = resVec)
+  rocs[[names(res)[i]]] <- do.call(rbind, auc)
+}
+l <- lapply(rocs, function(x) {
+  x[, .(AUC = flux::auc(fal, rec)), by = method]
+})
+aucs_full <- do.call(rbind, l)
+
+n <- nrow(l[[1]])
+aucs_full$deltaDD <- rep(info$deltaDD, each = n)
+aucs_full$btch <- rep(info$btch, each = n)
+aucs_full$sim <- rep(info$sim, each = n)
+aucs_full$type <- "Full"
+
+l <- lapply(rocs, function(x) {
+  x[, .(trueFDR = trueFDR[which.min(abs(predFDR - 0.1))]), by = method]
+})
+fdrs_full <- do.call(rbind, l)
+
+n <- nrow(l[[1]])
+fdrs_full$deltaDD <- rep(info$deltaDD, each = n)
+fdrs_full$btch <- rep(info$btch, each = n)
+fdrs_full$sim <- rep(info$sim, each = n)
+fdrs_full$type <- "Full"
+```
+
+## Shape
+
+For all simulations and all methods AUCs and FDR differences are computed
+regarding only differential shape.
+
+```{r}
+rocs <- list()
+for (i in seq_along(res)) {
+  resVec <- res[[i]]
+  auc <- lapply(names(resVec), getROC, resVec = resVec, 
+                incl = c("random", "shape"))
+  rocs[[names(res)[i]]] <- do.call(rbind, auc)
+}
+l <- lapply(rocs, function(x) {
+  x[, .(AUC = flux::auc(fal, rec)), by = method]
+})
+aucs_shape <- do.call(rbind, l)
+
+n <- nrow(l[[1]])
+aucs_shape$deltaDD <- rep(info$deltaDD, each = n)
+aucs_shape$btch <- rep(info$btch, each = n)
+aucs_shape$sim <- rep(info$sim, each = n)
+aucs_shape$type <- "Shape"
+
+l <- lapply(rocs, function(x) {
+  x[, .(trueFDR = trueFDR[which.min(abs(predFDR - 0.1))]), by = method]
+})
+fdrs_shape <- do.call(rbind, l)
+
+n <- nrow(l[[1]])
+fdrs_shape$deltaDD <- rep(info$deltaDD, each = n)
+fdrs_shape$btch <- rep(info$btch, each = n)
+fdrs_shape$sim <- rep(info$sim, each = n)
+fdrs_shape$type <- "Shape"
+```
+
+## Both
+
+For all simulations and all methods AUCs and FDR differences are computed
+regarding only differential shape and mean.
+
+```{r}
+rocs <- list()
+for (i in seq_along(res)) {
+  resVec <- res[[i]]
+  auc <- lapply(names(resVec), getROC, resVec = resVec, 
+                incl = c("random", "both_a", "both_b"))
+  rocs[[names(res)[i]]] <- do.call(rbind, auc)
+}
+l <- lapply(rocs, function(x) {
+  x[, .(AUC = flux::auc(fal, rec)), by = method]
+})
+aucs_both <- do.call(rbind, l)
+
+n <- nrow(l[[1]])
+aucs_both$deltaDD <- rep(info$deltaDD, each = n)
+aucs_both$btch <- rep(info$btch, each = n)
+aucs_both$sim <- rep(info$sim, each = n)
+aucs_both$type <- "Both"
+
+l <- lapply(rocs, function(x) {
+  x[, .(trueFDR = trueFDR[which.min(abs(predFDR - 0.1))]), by = method]
+})
+fdrs_both <- do.call(rbind, l)
+
+n <- nrow(l[[1]])
+fdrs_both$deltaDD <- rep(info$deltaDD, each = n)
+fdrs_both$btch <- rep(info$btch, each = n)
+fdrs_both$sim <- rep(info$sim, each = n)
+fdrs_both$type <- "Both"
+```
+
+## Mean
+
+For all simulations and all methods AUCs and FDR differences are computed
+regarding only differential mean.
+
+```{r}
+rocs <- list()
+for (i in seq_along(res)) {
+  resVec <- res[[i]]
+  auc <- lapply(names(resVec), getROC, resVec = resVec, 
+                incl = c("random", "mean"))
+  rocs[[names(res)[i]]] <- do.call(rbind, auc)
+}
+l <- lapply(rocs, function(x) {
+  x[, .(AUC = flux::auc(fal, rec)), by = method]
+})
+aucs_mean <- do.call(rbind, l)
+
+n <- nrow(l[[1]])
+aucs_mean$deltaDD <- rep(info$deltaDD, each = n)
+aucs_mean$btch <- rep(info$btch, each = n)
+aucs_mean$sim <- rep(info$sim, each = n)
+aucs_mean$type <- "Mean"
+
+l <- lapply(rocs, function(x) {
+  x[, .(trueFDR = trueFDR[which.min(abs(predFDR - 0.1))]), by = method]
+})
+fdrs_mean <- do.call(rbind, l)
+
+n <- nrow(l[[1]])
+fdrs_mean$deltaDD <- rep(info$deltaDD, each = n)
+fdrs_mean$btch <- rep(info$btch, each = n)
+fdrs_mean$sim <- rep(info$sim, each = n)
+fdrs_mean$type <- "Mean"
+```
+
+
+
+# No Calls
+
+The percentage of genes for which no p value was produces by each method
+is computed.
+
+```{r}
+l <- lapply(noCall, function(sim) {
+  data.table(
+    noCalls = vapply(sim, function(x) x, numeric(1)),
+    method = names(sim)
+  )
+})
+noCall <- do.call(rbind, l)
+
+n <- nrow(l[[1]])
+noCall$deltaDD <- rep(info$deltaDD, each = n)
+noCall$btch <- rep(info$btch, each = n)
+noCall$sim <- rep(info$sim, each = n)
+noCall[, noCalls := noCalls / 10000 * 100]
+```
+
+They are all below 1%.
+
+```{r}
+ggplot(noCall, aes(x = method, y = noCalls)) +
+  geom_point() +
+  facet_grid(deltaDD ~ btch) +
+  scale_y_continuous("no calls (%)") +
+  theme_bw() +
+  theme(axis.text.x = element_text(angle = 90, vjust = 1, hjust = 1)) +
+  ggtitle("Failure to Provide P Values")
+```
+
+
+# Prediction Power
+
+The final table summarizing prediction power of all methods in all simulations
+for different kinds of differential distribution.
+
+```{r}
+aucs <- rbind(aucs_full, aucs_shape, aucs_both, aucs_mean)
+ggplot(aucs, aes(x = method, y = AUC, color = type)) +
+  geom_jitter(height = 0, width = 0.1) +
+  facet_grid(deltaDD ~ btch) +
+  theme_bw() +
+  theme(axis.text.x = element_text(angle = 90, vjust = 1, hjust = 1)) +
+  ggtitle("Prediction Power")
+```
+
+# FDR Control
+
+The final table summarizing difference between predicted and true FDR
+of all methods in all simulations
+for different kinds of differential distribution.
+
+```{r}
+fdrs <- rbind(fdrs_full, fdrs_shape, fdrs_both, fdrs_mean)
+fdrs$deltaFDR <- abs(fdrs$trueFDR - 0.1)
+ggplot(fdrs, aes(x = method, y = deltaFDR, color = type)) +
+  geom_jitter(height = 0, width = 0.1) +
+  facet_grid(deltaDD ~ btch) +
+  theme_bw() +
+  theme(axis.text.x = element_text(angle = 90, vjust = 1, hjust = 1)) +
+  ggtitle("FDR Control")
+```
+
+# Consensus
+
+A *edgeR_sum* and *scDD_pool_ks* seem interesting because they are both robust
+to batch effects.
+*edgeR_sum* is completely immune to batch effects.
+Its prediction power is not bad but it can never identify differential shape.
+*scDD_pool_ks* quickly regains FDR control 
+(after reducing batch effects a little).
+It is able to identify differential shapes.
+It would be interesting to create a consensus approach from these 2 predictors.
+This approach could be used if batch effects are not to strong.
+
+## Generate Results
+
+It is simulated what the power of such a consensus approach would be.
+FDRs of both methods are compared and the lowest one is used.
+
+```{r}
+newRes <- lapply(res, function(x) {
+  edge <- x$edgeR_sum
+  scdd <- x$scDD_pool_ks
+  edge <- edge[gene %in% scdd$gene, ]
+  new <- data.table(
+    FDR = apply(cbind(scdd$FDR, edge$FDR), 1, min),
+    gene = edge$gene,
+    label = edge$label
+  )
+  new$rank <- rank(new$FDR)
+  return(new)
+})
+```
+
+## Prepare Data
+
+Again for all different kinds of differential distribution
+the AUCs and the difference between true and predicted FDR are computed.
+
+### Full
+
+```{r}
+newRocs <- list()
+for (i in seq_along(newRes)) {
+  m <- newRes[[i]]
+  cm <- confuse(m$rank, m$label, m$FDR)
+  dt <- data.table(
+    rec = cm[[1]][, 1] / (cm[[1]][, 1] + cm[[1]][, 4]),
+    fal = cm[[1]][, 2] / (cm[[1]][, 2] + cm[[1]][, 3]),
+    trueFDR = cm[[1]][, 2] / (cm[[1]][, 2] + cm[[1]][, 1]),
+    predFDR = cm[[2]]
+  )
+  newRocs[[names(newRes)[i]]] <- dt
+}
+
+l <- lapply(newRocs, function(x) {
+  x[, .(AUC = flux::auc(fal, rec))]
+})
+newAucs_full <- do.call(rbind, l)
+n <- nrow(l[[1]])
+newAucs_full$deltaDD <- rep(info$deltaDD, each = n)
+newAucs_full$btch <- rep(info$btch, each = n)
+newAucs_full$sim <- rep(info$sim, each = n)
+newAucs_full$type <- "Full"
+
+l <- lapply(newRocs, function(x) {
+  x[, .(trueFDR = trueFDR[which.min(abs(predFDR - 0.1))])]
+})
+newFdrs_full <- do.call(rbind, l)
+n <- nrow(l[[1]])
+newFdrs_full$deltaDD <- rep(info$deltaDD, each = n)
+newFdrs_full$btch <- rep(info$btch, each = n)
+newFdrs_full$sim <- rep(info$sim, each = n)
+newFdrs_full$type <- "Full"
+```
+
+### Shape
+
+```{r}
+newRocs <- list()
+for (i in seq_along(newRes)) {
+  m <- newRes[[i]]
+  m <- m[label %in% c("random", "shape"), ]
+  cm <- confuse(m$rank, m$label, m$FDR)
+  dt <- data.table(
+    rec = cm[[1]][, 1] / (cm[[1]][, 1] + cm[[1]][, 4]),
+    fal = cm[[1]][, 2] / (cm[[1]][, 2] + cm[[1]][, 3]),
+    trueFDR = cm[[1]][, 2] / (cm[[1]][, 2] + cm[[1]][, 1]),
+    predFDR = cm[[2]]
+  )
+  newRocs[[names(newRes)[i]]] <- dt
+}
+
+l <- lapply(newRocs, function(x) {
+  x[, .(AUC = flux::auc(fal, rec))]
+})
+newAucs_shape <- do.call(rbind, l)
+n <- nrow(l[[1]])
+newAucs_shape$deltaDD <- rep(info$deltaDD, each = n)
+newAucs_shape$btch <- rep(info$btch, each = n)
+newAucs_shape$sim <- rep(info$sim, each = n)
+newAucs_shape$type <- "Shape"
+
+l <- lapply(newRocs, function(x) {
+  x[, .(trueFDR = trueFDR[which.min(abs(predFDR - 0.1))])]
+})
+newFdrs_shape <- do.call(rbind, l)
+n <- nrow(l[[1]])
+newFdrs_shape$deltaDD <- rep(info$deltaDD, each = n)
+newFdrs_shape$btch <- rep(info$btch, each = n)
+newFdrs_shape$sim <- rep(info$sim, each = n)
+newFdrs_shape$type <- "Shape"
+```
+
+### Both
+
+```{r}
+newRocs <- list()
+for (i in seq_along(newRes)) {
+  m <- newRes[[i]]
+  m <- m[label %in% c("random", "both_a", "both_b"), ]
+  cm <- confuse(m$rank, m$label, m$FDR)
+  dt <- data.table(
+    rec = cm[[1]][, 1] / (cm[[1]][, 1] + cm[[1]][, 4]),
+    fal = cm[[1]][, 2] / (cm[[1]][, 2] + cm[[1]][, 3]),
+    trueFDR = cm[[1]][, 2] / (cm[[1]][, 2] + cm[[1]][, 1]),
+    predFDR = cm[[2]]
+  )
+  newRocs[[names(newRes)[i]]] <- dt
+}
+
+l <- lapply(newRocs, function(x) {
+  x[, .(AUC = flux::auc(fal, rec))]
+})
+newAucs_both <- do.call(rbind, l)
+n <- nrow(l[[1]])
+newAucs_both$deltaDD <- rep(info$deltaDD, each = n)
+newAucs_both$btch <- rep(info$btch, each = n)
+newAucs_both$sim <- rep(info$sim, each = n)
+newAucs_both$type <- "Both"
+
+l <- lapply(newRocs, function(x) {
+  x[, .(trueFDR = trueFDR[which.min(abs(predFDR - 0.1))])]
+})
+newFdrs_both <- do.call(rbind, l)
+n <- nrow(l[[1]])
+newFdrs_both$deltaDD <- rep(info$deltaDD, each = n)
+newFdrs_both$btch <- rep(info$btch, each = n)
+newFdrs_both$sim <- rep(info$sim, each = n)
+newFdrs_both$type <- "Both"
+```
+
+### Mean
+
+```{r}
+newRocs <- list()
+for (i in seq_along(newRes)) {
+  m <- newRes[[i]]
+  m <- m[label %in% c("random", "mean"), ]
+  cm <- confuse(m$rank, m$label, m$FDR)
+  dt <- data.table(
+    rec = cm[[1]][, 1] / (cm[[1]][, 1] + cm[[1]][, 4]),
+    fal = cm[[1]][, 2] / (cm[[1]][, 2] + cm[[1]][, 3]),
+    trueFDR = cm[[1]][, 2] / (cm[[1]][, 2] + cm[[1]][, 1]),
+    predFDR = cm[[2]]
+  )
+  newRocs[[names(newRes)[i]]] <- dt
+}
+
+l <- lapply(newRocs, function(x) {
+  x[, .(AUC = flux::auc(fal, rec))]
+})
+newAucs_mean <- do.call(rbind, l)
+n <- nrow(l[[1]])
+newAucs_mean$deltaDD <- rep(info$deltaDD, each = n)
+newAucs_mean$btch <- rep(info$btch, each = n)
+newAucs_mean$sim <- rep(info$sim, each = n)
+newAucs_mean$type <- "Mean"
+
+l <- lapply(newRocs, function(x) {
+  x[, .(trueFDR = trueFDR[which.min(abs(predFDR - 0.1))])]
+})
+newFdrs_mean <- do.call(rbind, l)
+n <- nrow(l[[1]])
+newFdrs_mean$deltaDD <- rep(info$deltaDD, each = n)
+newFdrs_mean$btch <- rep(info$btch, each = n)
+newFdrs_mean$sim <- rep(info$sim, each = n)
+newFdrs_mean$type <- "Mean"
+```
+
+
+## Results
+
+This method would be used in the *weakEffect* scenarios.
+The AUCs seem identical to the ones using only *scDD_pool_ks*.
+
+```{r}
+newAucs <- rbind(newAucs_full, newAucs_shape, newAucs_both, newAucs_mean)
+newAucs$method <- "consensus"
+aucs <- rbind(aucs, newAucs)
+ggplot(aucs, aes(x = method, y = AUC, color = type)) +
+  geom_jitter(height = 0, width = 0.1) +
+  facet_grid(deltaDD ~ btch) +
+  theme_bw() +
+  theme(axis.text.x = element_text(angle = 90, vjust = 1, hjust = 1)) +
+  ggtitle("Prediction Power")
+```
+
+It can be confirmed the consensus approach also controls the FDR in the
+*weakEffect* scenarios.
+
+```{r}
+newFDRs <- rbind(newFdrs_full, newFdrs_shape, newFdrs_both, newFdrs_mean)
+newFDRs$method <- "consensus"
+newFDRs$deltaFDR <- abs(newFDRs$trueFDR - 0.1)
+fdrs <- rbind(fdrs, newFDRs)
+ggplot(fdrs, aes(x = method, y = deltaFDR, color = type)) +
+  geom_jitter(height = 0, width = 0.1) +
+  facet_grid(deltaDD ~ btch) +
+  theme_bw() +
+  theme(axis.text.x = element_text(angle = 90, vjust = 1, hjust = 1)) +
+  ggtitle("FDR Control")
+```
+
+## Overlaps
+
+The overlap between both predictors is investigated.
+For a sequence of FDR thresholds genes are classified by both predictors as
+significantly differential distributed.
+The overlap of itendified genes is calculated as ratio between their intersect
+to their union set.
+
+```{r}
+th <- seq(0.01, 1, .01)
+s <- vector('list', length(th))
+for (i in seq_along(th)) {
+  l <- lapply(res, function(x) {
+    edge <- x$edgeR_sum[FDR < th[i], gene]
+    scdd <- x$scDD_pool_ks[FDR < th[i], gene]
+    length(intersect(edge, scdd)) / length(union(edge, scdd))
+  })
+  s[[i]] <- data.table(
+    overlap = do.call(rbind, l),
+    FDR = th[i]
+  )
+}
+cmp <- do.call(rbind, s)
+cmp$deltaDD <- rep(info$deltaDD, length(s))
+cmp$btch <- rep(info$btch, length(s))
+cmp$sim <- rep(info$sim, length(s))
+cmp$int <- paste0(cmp$sim, cmp$deltaDD)
+```
+
+The plot below shows the relative overlap between both predictors.
+Only the cases of weak batch effects is shown, since only for these cases
+both predictors can control FDR.
+
+In general both predictors identify different genes with increasing FDR.
+However, for very low FDRs (~1%) they identify similar genes,
+especially if their delta is low.
+
+```{r}
+ggplot(cmp[btch == "weakEffect", ], aes(x = FDR, y = overlap.V1)) +
+  geom_path(aes(group = int, color = deltaDD)) +
+  scale_y_continuous("intersect / union") +
+  theme_bw() +
+  ggtitle("Overlap of edgeR_sum and scDD_pool_ks")
+```
+
+## ROC Curves
+
+Since both predictors identify different genes their ROC curves are 
+investigated again.
+The following code produces 1000 confusion matrices at differing stringency
+for all simulation settings for *edgeR_sum*, *scDD_pool_ks*, and the
+*consensus* predictor.
+
+```{r}
+methods <- c("edgeR_sum", "scDD_pool_ks")
+cms <- list()
+for (m in methods) {
+  l <- lapply(res, function(x) {
+    dt <- x[[m]]
+    cm <- confuse(dt$rank, dt$label, dt$FDR)
+     dt <- data.table(
+      rec = cm[[1]][, 1] / (cm[[1]][, 1] + cm[[1]][, 4]),
+      fal = cm[[1]][, 2] / (cm[[1]][, 2] + cm[[1]][, 3]),
+      pre = cm[[1]][, 1] / (cm[[1]][, 1] + cm[[1]][, 2]),
+      FDR = cm[[2]],
+      method = m
+    )
+  })
+  cms[[m]] <- do.call(rbind, l)
+}
+n <- 1000
+cms <- do.call(rbind, cms)
+cms$deltaDD <- rep(rep(info$deltaDD, each = n), 2)
+cms$btch <- rep(rep(info$btch, each = n), 2)
+cms$sim <- rep(rep(info$sim, each = n), 2)
+m <- "consensus"
+l <- lapply(newRes, function(x) {
+  dt <- x
+  cm <- confuse(dt$rank, dt$label, dt$FDR)
+   dt <- data.table(
+    rec = cm[[1]][, 1] / (cm[[1]][, 1] + cm[[1]][, 4]),
+    fal = cm[[1]][, 2] / (cm[[1]][, 2] + cm[[1]][, 3]),
+    pre = cm[[1]][, 1] / (cm[[1]][, 1] + cm[[1]][, 2]),
+    FDR = cm[[2]],
+    method = m
+  )
+})
+cm <- do.call(rbind, l)
+n <- 1000
+cm$deltaDD <- rep(info$deltaDD, each = n)
+cm$btch <- rep(info$btch, each = n)
+cm$sim <- rep(info$sim, each = n)
+cms <- rbind(cms, cm)
+```
+
+In the following plot all kinds of differential distributions are considered.
+scDD dominates edgeR overall, but the consensus approach is still able to
+increase prediction power.
+
+```{r}
+cms_w <- cms[btch == "weakEffect", ]
+cms_w$int <- paste0(cms_w$deltaDD, cms_w$sim)
+ggplot(cms_w, aes(x = fal, y = rec, color = method)) +
+  geom_path(aes(group = int)) +
+  facet_grid(. ~ deltaDD) +
+  theme_bw() +
+  ggtitle("Overall Prediction Power")
+```
+
+In the follwing chunk the same values are computed, only considering 
+differential shape.
+
+```{r}
+methods <- c("edgeR_sum", "scDD_pool_ks")
+cms <- list()
+for (m in methods) {
+  l <- lapply(res, function(x) {
+    dt <- x[[m]][label %in% c("shape", "random")]
+    cm <- confuse(dt$rank, dt$label, dt$FDR)
+     dt <- data.table(
+      rec = cm[[1]][, 1] / (cm[[1]][, 1] + cm[[1]][, 4]),
+      fal = cm[[1]][, 2] / (cm[[1]][, 2] + cm[[1]][, 3]),
+      pre = cm[[1]][, 1] / (cm[[1]][, 1] + cm[[1]][, 2]),
+      FDR = cm[[2]],
+      method = m
+    )
+  })
+  cms[[m]] <- do.call(rbind, l)
+}
+n <- 1000
+cms <- do.call(rbind, cms)
+cms$deltaDD <- rep(rep(info$deltaDD, each = n), 2)
+cms$btch <- rep(rep(info$btch, each = n), 2)
+cms$sim <- rep(rep(info$sim, each = n), 2)
+m <- "consensus"
+l <- lapply(newRes, function(x) {
+  dt <- x[label %in% c("shape", "random")]
+  cm <- confuse(dt$rank, dt$label, dt$FDR)
+   dt <- data.table(
+    rec = cm[[1]][, 1] / (cm[[1]][, 1] + cm[[1]][, 4]),
+    fal = cm[[1]][, 2] / (cm[[1]][, 2] + cm[[1]][, 3]),
+    pre = cm[[1]][, 1] / (cm[[1]][, 1] + cm[[1]][, 2]),
+    FDR = cm[[2]],
+    method = m
+  )
+})
+cm <- do.call(rbind, l)
+n <- 1000
+cm$deltaDD <- rep(info$deltaDD, each = n)
+cm$btch <- rep(info$btch, each = n)
+cm$sim <- rep(info$sim, each = n)
+cms <- rbind(cms, cm)
+```
+
+EdgeR cannot identify differential shapes.
+Genes containing differential shapes are identified only by scDD.
+Therefore the consensus approach does not improve prediction power here.
+
+```{r}
+cms_w <- cms[btch == "weakEffect", ]
+cms_w$int <- paste0(cms_w$deltaDD, cms_w$sim)
+ggplot(cms_w, aes(x = fal, y = rec, color = method)) +
+  geom_path(aes(group = int)) +
+  facet_grid(. ~ deltaDD) +
+  theme_bw() +
+  ggtitle("Prediction Power Differential Shape")
+```
+
+
+
+
+
