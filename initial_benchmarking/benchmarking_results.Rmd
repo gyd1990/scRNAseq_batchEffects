@@ -1,0 +1,343 @@
+---
+title: "Results"
+subtitle: "Initial Benchmarking"
+author: "Marc Schwering"
+output:
+  html_document:
+    number_sections: true
+    toc: true
+    toc_depth: 2
+    fig_width: 10
+    fig_height: 7
+    theme: cosmo
+---
+
+
+
+
+
+
+
+# Preparation
+
+Libraries are loaded.
+
+```{r}
+library(ggplot2)
+library(data.table)
+```
+
+Paths are created for all scenarios and simulations.
+
+```{r}
+paths <- expand.grid(
+  c("strongDD", "weakDD"), 
+  c("strongBatch", "weakBatch"),
+  c("sim1", "sim2", "sim3")
+)
+paths <- apply(paths, 1, function(x) {
+  sprintf("%s_%s%s%s", x[1], x[2], .Platform$file.sep, x[3])
+})
+scenarios <- expand.grid(
+  DiffDistr = c("strongDD", "weakDD"), 
+  BatchEffect = c("strongBatch", "weakBatch"),
+  Simulation = c("sim1", "sim2", "sim3")
+)
+
+
+a <- readRDS(file.path(paths[1], "results", "noCall.rds"))
+a <- readRDS(file.path(paths[1], "results", "ROC.rds"))
+
+```
+
+**Load noCalls**
+
+Objects are loaded.
+For the case that a simulation did not ru through, a placeholder is
+inserted (as list element).
+
+```{r}
+placeholder <- list(
+  edgeR_pool = NaN, edgeR_sum = NaN, BPSC_pool = NaN, BPSC_corr = NaN, 
+  scDD_pool_ks = NaN, scDD_corr_ks = NaN, scDD_pool_perm = NaN, 
+  scDD_corr_perm = NaN, MAST_pool = NaN, MAST_corr = NaN
+)
+l <- lapply(paths, function(path) {
+  tryCatch(readRDS(file.path(path, "results", "noCall.rds")),
+           error = function(e) placeholder)
+})
+l <- lapply(l, function(x) setDT(x))
+noCalls <- rbindlist(l)
+noCalls <- cbind(noCalls, scenarios)
+noCalls[!complete.cases(noCalls), .(DiffDistr, BatchEffect, Simulation)]
+```
+
+In simulation 3 of scenario strong differential distribution and weak batch
+effect the manual cell filter was to stringent.
+It removed most cells of group II.
+That led to failure of the subsequent processing steps.
+
+In the other case (strong D.D., strong batch effect, simulation 3)
+I don't know what exactly went wrong.
+Data quality control and normalization, and the characterization look normal.
+For some reason the benchmarking skript aborted.
+I have to look further into that.
+
+**Load ROCs**
+
+```{r}
+placeholder <- data.table(rec = NaN, fal = NaN, trueFDR = NaN, predFDR = NaN,
+                          method = "", type = "")
+l <- lapply(paths, function(path) {
+  tryCatch(readRDS(file.path(path, "results", "ROC.rds")),
+           error = function(e) placeholder)
+})
+for (i in seq_along(l)) {
+  l[[i]]$DiffDistr <- scenarios$DiffDistr[i]
+  l[[i]]$BatchEffect <- scenarios$BatchEffect[i]
+  l[[i]]$Simulation <- scenarios$Simulation[i]
+}
+ROCs <- rbindlist(l)
+ROCs[method == "", .(DiffDistr, BatchEffect, Simulation)]
+```
+
+The missing datasets are the same as above.
+For now we can ignore these 2 simulations.
+
+```{r}
+noCalls <- noCalls[complete.cases(noCalls), ]
+ROCs <- ROCs[method != "", ]
+```
+
+
+
+
+
+
+# NaN P Values
+
+Some methods created NaNs for several genes instead of p values.
+Method which did that for more than 10\% NaN p values were already removed.
+
+```{r}
+dt <- melt(noCalls, 11:13, 1:10, "method", "NaNs")
+ggplot(dt, aes(y = NaNs, color = method)) +
+  geom_jitter(aes(x = method), height = 0, width = .2) +
+  facet_grid(BatchEffect ~ DiffDistr) +
+  theme_bw()
+```
+
+EdgeR, and MAST produce no NaNs, BPSC only few.
+However, scDD with pooled cells creates up to 1\% NaN p values.
+It seems that more NaN p values are created if the batch effect is weaker or
+the differential distribution is stronger.
+
+
+
+
+
+
+
+
+
+# Prediction Power
+
+We use AUC as a measure of prediction power, which basically investigates the
+ranking of genes.
+We can compute the AUC for the full dataset or only for a certain type of 
+differential distribution.
+In this case all other types of differential distribution are neglected.
+
+## Full
+
+```{r, fig.height=10, fig.width=12}
+dt <- ROCs[type == "full"]
+dt[, group := paste0(method, Simulation)]
+ggplot(dt, aes(group = group)) +
+  geom_path(aes(x = fal, y = rec, color = method)) +
+  geom_abline(slope = 1, color = "gray", linetype = 2) +
+  facet_grid(DiffDistr ~ BatchEffect) +
+  theme_bw() +
+  ggtitle("ROC -- All types")
+```
+
+In the weak batch effect scenarios scDD with pooled or batch correlation
+adjusted cells and Kolmogorov Smirnov Test, and MAST with pooled cells or
+batch correlation adjusted cells seems to dominate.
+In the strong batch effect scenarios MAST is better.
+
+```{r, fig.height=10, fig.width=12}
+dt <- dt[, .(AUC = flux::auc(fal, rec)), 
+         by = .(method, DiffDistr, BatchEffect, Simulation)]
+ggplot(dt, aes(color = method)) +
+  geom_jitter(aes(x = method, y = AUC), width = .1, height = 0) +
+  facet_grid(DiffDistr ~ BatchEffect) +
+  theme_bw() +
+  theme(axis.text.x = element_text(angle = 90, vjust = 1, hjust = 1)) +
+  ggtitle("AUC -- All types")
+```
+
+
+## D. Shape
+
+```{r, fig.height=10, fig.width=12}
+dt <- ROCs[type == "shape"]
+dt[, group := paste0(method, Simulation)]
+ggplot(dt, aes(group = group)) +
+  geom_path(aes(x = fal, y = rec, color = method)) +
+  geom_abline(slope = 1, color = "gray", linetype = 2) +
+  facet_grid(DiffDistr ~ BatchEffect) +
+  theme_bw() +
+  ggtitle("ROC -- D. Shape only")
+```
+
+In weak batch effect scenarios scDD with pooled cells and KS test seems to 
+work best, in strong batch effect scnearios MAST with pooled cells.
+
+```{r, fig.height=10, fig.width=12}
+dt <- dt[, .(AUC = flux::auc(fal, rec)), 
+         by = .(method, DiffDistr, BatchEffect, Simulation)]
+ggplot(dt, aes(color = method)) +
+  geom_jitter(aes(x = method, y = AUC), width = .1, height = 0) +
+  facet_grid(DiffDistr ~ BatchEffect) +
+  theme_bw() +
+  theme(axis.text.x = element_text(angle = 90, vjust = 1, hjust = 1)) +
+  ggtitle("AUC -- D. Shape only")
+```
+
+## D. Mean
+
+```{r, fig.height=10, fig.width=12}
+dt <- ROCs[type == "mean"]
+dt[, group := paste0(method, Simulation)]
+ggplot(dt, aes(group = group)) +
+  geom_path(aes(x = fal, y = rec, color = method)) +
+  geom_abline(slope = 1, color = "gray", linetype = 2) +
+  facet_grid(DiffDistr ~ BatchEffect) +
+  theme_bw() +
+  ggtitle("ROC -- D. Mean only")
+```
+
+Here, all BPSC and edgeR method dominate.
+They seemed to be very good at identifying different means.
+
+```{r, fig.height=10, fig.width=12}
+dt <- dt[, .(AUC = flux::auc(fal, rec)), 
+         by = .(method, DiffDistr, BatchEffect, Simulation)]
+ggplot(dt, aes(color = method)) +
+  geom_jitter(aes(x = method, y = AUC), width = .1, height = 0) +
+  facet_grid(DiffDistr ~ BatchEffect) +
+  theme_bw() +
+  theme(axis.text.x = element_text(angle = 90, vjust = 1, hjust = 1)) +
+  ggtitle("AUC -- D. Mean only")
+```
+
+## D. Both
+
+```{r, fig.height=10, fig.width=12}
+dt <- ROCs[type == "both"]
+dt[, group := paste0(method, Simulation)]
+ggplot(dt, aes(group = group)) +
+  geom_path(aes(x = fal, y = rec, color = method)) +
+  geom_abline(slope = 1, color = "gray", linetype = 2) +
+  facet_grid(DiffDistr ~ BatchEffect) +
+  theme_bw() +
+  ggtitle("ROC -- D. Both only")
+```
+
+The mixture types seemed to be dominated by the methods which identify different
+means well: edgeR and BPSC.
+However, MAST also performs well.
+
+```{r, fig.height=10, fig.width=12}
+dt <- dt[, .(AUC = flux::auc(fal, rec)), 
+         by = .(method, DiffDistr, BatchEffect, Simulation)]
+ggplot(dt, aes(color = method)) +
+  geom_jitter(aes(x = method, y = AUC), width = .1, height = 0) +
+  facet_grid(DiffDistr ~ BatchEffect) +
+  theme_bw() +
+  theme(axis.text.x = element_text(angle = 90, vjust = 1, hjust = 1)) +
+  ggtitle("AUC -- D. Both only")
+```
+
+
+
+
+
+
+# FDR Control
+
+To visualize FDR control we plot predicted over true FDR below.
+
+```{r, warning=FALSE, fig.height=10, fig.width=12}
+dt <- ROCs[type == "full"]
+dt[, group := paste0(method, Simulation)]
+ggplot(dt, aes(group = group)) +
+  geom_path(aes(x = trueFDR, y = predFDR, color = method)) +
+  geom_abline(slope = 1, color = "gray", linetype = 2) +
+  facet_grid(DiffDistr ~ BatchEffect) +
+  theme_bw() +
+  ggtitle("FDR Control")
+```
+
+Here, it is clearly visible that only edgeR with summed up cells (as of A. Lun)
+is robust to batch effects.
+All other methods completely lost FDR control in the strong batch effect 
+scenarios.
+(Remember: the strong batch effect scenarios resemble the Lun 2016 dataset)
+
+It is interesting how in the weak batch effect scenarios methods regain
+FDR control a little, some more some less.
+scDD with pooled cells already completely regained FDR control in these
+scenarios.
+
+Below we measure the difference between true and predicted FDR at predicted 
+FDRs of 1\%, 5\% and 10\% for all methods and scenarios.
+
+```{r, warning=FALSE, fig.height=10, fig.width=12}
+dt[, D_FDR := trueFDR - predFDR]
+dt <- dt[, .(FDR.01 = D_FDR[which.min(abs(predFDR - 0.01))],
+             FDR.05 = D_FDR[which.min(abs(predFDR - 0.05))],
+             FDR.10 = D_FDR[which.min(abs(predFDR - 0.10))]), 
+        by = .(method, DiffDistr, BatchEffect, Simulation)]
+ggplot(dt, aes(color = method)) +
+  geom_jitter(aes(x = method, y = FDR.01), height = 0, width = .1) +
+  facet_grid(DiffDistr ~ BatchEffect) +
+  theme_bw() +
+  theme(axis.text.x = element_text(angle = 90, vjust = 1, hjust = 1)) +
+  ggtitle("FDR Control at 1% Predicted FDR")
+ggplot(dt, aes(color = method)) +
+  geom_jitter(aes(x = method, y = FDR.05), height = 0, width = .1) +
+  facet_grid(DiffDistr ~ BatchEffect) +
+  theme_bw() +
+  theme(axis.text.x = element_text(angle = 90, vjust = 1, hjust = 1)) +
+  ggtitle("FDR Control at 5% Predicted FDR")
+ggplot(dt, aes(color = method)) +
+  geom_jitter(aes(x = method, y = FDR.10), height = 0, width = .1) +
+  facet_grid(DiffDistr ~ BatchEffect) +
+  theme_bw() +
+  theme(axis.text.x = element_text(angle = 90, vjust = 1, hjust = 1)) +
+  ggtitle("FDR Control at 10% Predicted FDR")
+```
+
+Clearly edgeR is not completely immune to batch effects, it too deviates
+a little.
+Interestingly scDD completely gained FDR control in weak batch effect scenarios
+while the other methods still strugle to predict the true FDR.
+
+
+
+
+
+
+
+# Session Info
+
+```{r}
+sessionInfo()
+```
+
+
+
+
+

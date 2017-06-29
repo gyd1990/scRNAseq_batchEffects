@@ -1,0 +1,485 @@
+---
+title: "Consensus Approach"
+subtitle: "Initial Benchmarking"
+author: "Marc Schwering"
+output:
+  html_document:
+    number_sections: true
+    toc: true
+    toc_depth: 2
+    fig_width: 10
+    fig_height: 7
+    theme: cosmo
+---
+
+
+
+
+
+# Introduction
+
+scDD using pooled cells and KS test (scDD_pool_ks), 
+and edgeR using summed up batches (edgeR_sum)
+seemed interesting in the initial benchmarking.
+scDD_pool_ks is quite powerful and nicely holds FDR control if the batch effect
+is not too strong.
+edgeR_sum is only good at detecting differential means, but holds FDR control
+even under strong batch effects.
+Here, I want to investigate both methods.
+
+```{r, message=FALSE, results='hide'}
+library(data.table) # database-like tables
+library(ggplot2) # plotting
+library(scater) # scRNA-seq
+library(scDD) # call DD
+library(SummarizedExperiment) # using scDD
+library(edgeR) # call DD
+library(BiocParallel) # parallel
+```
+
+I have to recreate the results of these methods again.
+Since scDD completely loses FDR control in the strong batch effects scenarios,
+only the weak batch effects scenarios would be of interest.
+
+```{r}
+paths <- expand.grid(c("strongDD", "weakDD"), "weakBatch", 
+                     c("sim1", "sim2", "sim3"))
+paths <- apply(paths, 1, function(x) {
+  sprintf("%s_%s%s%s", x[1], x[2], .Platform$file.sep, x[3])
+})
+scenarios <- expand.grid(
+  DiffDistr = c("strongDD", "weakDD"),
+  Simulation = c("sim1", "sim2", "sim3")
+)
+```
+
+From the results summary I know that simulation 3 of the strongDD, weakBatch
+scenario failed.
+
+```{r}
+paths <- paths[-5]
+scenarios <- scenarios[-5, ]
+```
+
+
+
+
+
+
+
+
+***
+
+
+
+
+# Reproduce Results
+
+I need the genewise results of each method.
+Therefore I need to reproduce the results.
+
+```{r}
+edgeR_results <- function(sce, grpID = "group", 
+                          btchID = "batch", smplID = "sample") {
+  batches <- as.factor(sce[[btchID]])
+  l <- lapply(levels(batches), function(i) {
+    rowSums(counts(sce)[, which(batches == i)])
+  })
+  m <- do.call("cbind", l)
+  groups <- rep(c("Group1", "Group2"), each = 3)
+  dge <- DGEList(counts = m, group = groups)
+  dge <- calcNormFactors(dge)
+  design <- model.matrix(~ groups)
+  dge <- estimateDisp(dge, design)
+  fit <- glmFit(dge, design)
+  lrt <- glmLRT(fit, coef = 2)
+  
+  # get results
+  res <- topTags(lrt, n = Inf)$table
+  res$gene <- as.numeric(
+    gsub("([A-Za-z]+)([0-9]+)", "\\2", rownames(res))
+  )
+  res$rank <- 1:nrow(res)
+  res <- res[, -3:-1]
+  names(res)[1] <- "pVal"
+  res <- as.data.table(res)
+  res <- res[order(res$gene), ]
+  res$label <- fData(sce)$label
+  return(res)
+}
+
+scDD_results <- function(sce, grpID = "group", 
+                          btchID = "batch", smplID = "sample") {
+  groups <- sce[[grpID]]
+  m <- exprs(sce)
+  m[m < 0] <- 0
+  m <- 2^m - 1
+  se <- SummarizedExperiment(
+    assays = list("NormCounts" = m),
+    colData = data.frame(condition = groups)
+  )
+  se <- scDD(se, permutations = 0, testZeroes = FALSE,
+             prior_param = list(alpha = 0.01, mu0 = 0, s0 = 0.01, 
+                                a0 = 0.01, b0 = 0.01))
+  # get results
+  res <- results(se)
+  pVals <- res$nonzero.pvalue
+  fdrs <- res$nonzero.pvalue.adj
+  genes <- as.numeric(
+    gsub("([A-Za-z]+)([0-9]+)", "\\2", as.character(res$gene))
+  )
+  res <- data.table(
+    pVal = pVals, 
+    FDR = fdrs, 
+    gene = genes, 
+    rank = rank(pVals)
+  )
+  res <- res[order(res$gene), ]
+  res$label <- fData(sce)$label
+  return(res)
+}
+```
+
+This function will reproduce the results tables for these 2 methods.
+
+```{r, results='hide'}
+FUN <- function(path, FedgeR, FscDD) {
+  sce <- readRDS(file.path(path, "intermediate_data", "normed.rds"))
+  edgeR <- FedgeR(sce)
+  scDD <- FscDD(sce)
+  edgeR[, method := "edgeR_sum"]
+  scDD[, method := "scDD_pool_ks"]
+  return(rbind(edgeR, scDD))
+}
+```
+
+```{r, results='hide'}
+l <- bplapply(paths, FUN, FedgeR = edgeR_results, FscDD = scDD_results)
+for (i in seq_along(l)) {
+  l[[i]]$DiffDistr <- scenarios$DiffDistr[i]
+  l[[i]]$Simulation <- scenarios$Simulation[i]
+}
+res <- rbindlist(l)
+saveRDS(res, "results.rds")
+```
+
+
+
+
+***
+
+
+
+
+
+
+
+
+
+# Overlap
+
+scDD and edgeR work completely differently and so I wondered what kind of genes
+they each call.
+Below, the relative overlap of genes identified by both methods at different
+FDR thresholds is calculated.
+That is the size of intersection set divided by the size of the union set
+of genes identified by both methods.
+
+```{r}
+ths <- seq(.01, 1, .01)
+ol <- function(x, y) {
+  length(intersect(na.omit(x), na.omit(y))) / 
+    length(union(na.omit(x), na.omit(y)))
+}
+l <- lapply(ths, function(th) {
+  dt <- res[FDR <= th, gene, by = .(method, Simulation, DiffDistr)]
+  dt <- dcast(dt, Simulation + DiffDistr + gene~ method, value.var = "gene")
+  dt[, .(Overlap = ol(edgeR_sum, scDD_pool_ks)), by = .(Simulation, DiffDistr)]
+})
+for (i in seq_along(l)) l[[i]]$FDR <- ths[i]
+overlap <- rbindlist(l)
+```
+
+The relative overlap for all simulations with a weak batch effect 
+(where both edgeR and scDD hold FDR control)
+is shown below.
+
+```{r, results='hide'}
+overlap[, group := paste0(DiffDistr, Simulation)]
+ggplot(overlap, aes(color = DiffDistr, group = group)) +
+  geom_line(aes(x = FDR, y = Overlap)) +
+  theme_bw()
+```
+
+This plot confirms the assumption that both methods identify rather different
+genes.
+
+
+
+
+
+
+***
+
+
+
+
+
+
+
+
+
+
+# edgeR and scDD Ensemble
+
+Naturally, one would like to leverage the strengths of both methods.
+The easiest way to do this would be to take the union of identified 
+genes by both methods.
+I will call this ensemble method *consensus approach* here.
+To simulate this approach for each gene and simulation the lower FDR from
+edgeR and scDD is taken as result.
+
+```{r, results='hide'}
+cons <- dcast(res, DiffDistr + Simulation + gene + label ~ method, 
+              value.var = "FDR")
+cons[, consensus := pmin(edgeR_sum, scDD_pool_ks, na.rm = TRUE)]
+cons <- melt(cons, 1:4, 5:7, "method", "FDR")
+```
+
+Ranks are calculated again.
+
+```{r}
+cons <- cons[, .(gene = gene, label = label, FDR = FDR, rank = rank(FDR)), 
+             by = .(DiffDistr, Simulation, method)]
+```
+
+Now recall, fallout, true and predicted FDRs have to be calculated again
+for a spectrum of different ranks.
+The function below does that from ranks, labels and FDRs.
+
+```{r}
+getROC <- function(ranks, labels, FDRs, n = 1000, incl = NULL) {
+  stopifnot(length(ranks) == length(labels) & length(ranks) == length(FDRs))
+  
+  # prepare table
+  if (!is.null(incl)) {
+    idx <- which(labels %in% incl)
+    ranks <- ranks[idx]
+    labels <- labels[idx]
+    FDRs <- FDRs[idx]
+  }
+  dt <- data.table(rank = ranks, label = labels, FDR = FDRs)
+  steps <- seq.int(2, nrow(dt), length.out = n)
+  dt <- dt[order(rank)]
+  
+  # make confusion matrix
+  cm <- matrix(NA, n, 4, dimnames = list(steps, c("TP", "FP", "TN", "FN")))
+  for( s in seq_along(steps) ){
+    res <- dt[, .(TP = sum(rank < steps[s] & label != "random"), 
+                    FP = sum(rank < steps[s] & label == "random"), 
+                    TN = sum(rank >= steps[s] & label == "random"), 
+                    FN = sum(rank >= steps[s] & label != "random"))]
+    cm[s, ] <- as.numeric(res[1, ])
+  }
+  
+  # get ROC and FDRs
+  dt <- data.table(
+    rec = cm[, 1] / (cm[, 1] + cm[, 4]),
+    fal = cm[, 2] / (cm[, 2] + cm[, 3]),
+    trueFDR = cm[, 2] / (cm[, 2] + cm[, 1]),
+    predFDR = dt[steps - 1, FDR]
+  )
+  return(dt)
+}
+```
+
+
+
+
+## Prediction Power
+
+Now prediction power and FDR control can be calculated like before.
+
+**Full**
+
+```{r}
+sims <- cons[, 1, by = .(DiffDistr, Simulation, method)]
+l <- lapply(seq_len(nrow(sims)), function(i) {
+  dt <- cons[DiffDistr == sims[i, DiffDistr] & method == sims[i, method] & 
+               Simulation == sims[i, Simulation]]
+  test <- getROC(dt$rank, dt$label, dt$FDR, incl = NULL)
+  test$DiffDistr <- sims[i, DiffDistr]
+  test$Simulation <- sims[i, Simulation]
+  test$method <- sims[i, method]
+  test
+})
+ROCs <- rbindlist(l)
+```
+
+For all types of differential distribution ROC curves are shown below.
+
+```{r, fig.height=5}
+ROCs[, group := paste0(method, Simulation)]
+ggplot(ROCs, aes(group = group)) +
+  geom_path(aes(x = fal, y = rec, color = method)) +
+  geom_abline(slope = 1, color = "gray", linetype = 2) +
+  facet_grid(~ DiffDistr) +
+  theme_bw() +
+  ggtitle("ROC -- All types")
+```
+
+The consensus method is substantially more powerful than both other methods.
+
+```{r, fig.height=5}
+dt <- ROCs[, .(AUC = flux::auc(fal, rec)), 
+         by = .(method, DiffDistr, Simulation)]
+ggplot(dt, aes(color = method)) +
+  geom_jitter(aes(x = method, y = AUC), width = .1, height = 0) +
+  facet_grid(~ DiffDistr) +
+  theme_bw() +
+  ggtitle("AUC -- All types")
+```
+
+
+**D.Shape**
+
+```{r}
+l <- lapply(seq_len(nrow(sims)), function(i) {
+  dt <- cons[DiffDistr == sims[i, DiffDistr] & method == sims[i, method] & 
+               Simulation == sims[i, Simulation]]
+  test <- getROC(dt$rank, dt$label, dt$FDR, incl = c("random", "shape"))
+  test$DiffDistr <- sims[i, DiffDistr]
+  test$Simulation <- sims[i, Simulation]
+  test$method <- sims[i, method]
+  test
+})
+ROCshape <- rbindlist(l)
+```
+
+Of particular interest for me is how well the method can identify changes other
+than differential means.
+Therefore, D. Shape is shown here separately.
+The consensus method might suffer from edgeR's predictions in the case of
+differential shape.
+
+```{r, fig.height=5}
+ROCshape[, group := paste0(method, Simulation)]
+ggplot(ROCshape, aes(group = group)) +
+  geom_path(aes(x = fal, y = rec, color = method)) +
+  geom_abline(slope = 1, color = "gray", linetype = 2) +
+  facet_grid(~ DiffDistr) +
+  theme_bw() +
+  ggtitle("ROC -- D.Shape only")
+```
+
+The plot shows that this does not seem to be the case.
+
+```{r, fig.height=5}
+dt <- ROCshape[, .(AUC = flux::auc(fal, rec)), 
+         by = .(method, DiffDistr, Simulation)]
+ggplot(dt, aes(color = method)) +
+  geom_jitter(aes(x = method, y = AUC), width = .1, height = 0) +
+  facet_grid(~ DiffDistr) +
+  theme_bw() +
+  ggtitle("AUC -- D.Shape only")
+```
+
+
+## FDR Control
+
+Another important issue is FDR control.
+Intuitively the consensus approach would inherit FDR control from
+the more promiscuous single method.
+
+```{r, fig.height=5}
+ROCs[, group := paste0(method, Simulation)]
+ggplot(ROCs, aes(group = group)) +
+  geom_path(aes(x = trueFDR, y = predFDR, color = method)) +
+  geom_abline(slope = 1, color = "gray", linetype = 2) +
+  facet_grid(~ DiffDistr) +
+  theme_bw() +
+  ggtitle("FDR Control")
+```
+
+The difference between true and predicted FDRs for predicted FDRs at 
+1\%, 5\%, and 10\% are shown below.
+Same simulations are indicated by a gray line.
+
+```{r, fig.height=5}
+ROCs[, D_FDR := trueFDR - predFDR]
+FDRs <- ROCs[, .(FDR.01 = D_FDR[which.min(abs(predFDR - 0.01))],
+             FDR.05 = D_FDR[which.min(abs(predFDR - 0.05))],
+             FDR.10 = D_FDR[which.min(abs(predFDR - 0.10))]), 
+        by = .(method, DiffDistr, Simulation)]
+ggplot(FDRs, aes(x = method, y = FDR.01)) +
+  geom_line(aes(group = Simulation), color = "gray") +
+  geom_point(aes(color = method)) +
+  facet_grid(~ DiffDistr) +
+  theme_bw() +
+  ggtitle("FDR Control at 1% Predicted FDR")
+ggplot(FDRs, aes(x = method, y = FDR.05)) +
+  geom_line(aes(group = Simulation), color = "gray") +
+  geom_point(aes(color = method)) +
+  facet_grid(~ DiffDistr) +
+  theme_bw() +
+  ggtitle("FDR Control at 5% Predicted FDR")
+ggplot(FDRs, aes(x = method, y = FDR.10)) +
+  geom_line(aes(group = Simulation), color = "gray") +
+  geom_point(aes(color = method)) +
+  facet_grid(~ DiffDistr) +
+  theme_bw() +
+  ggtitle("FDR Control at 10% Predicted FDR")
+```
+
+FDR control seems to increase additively for the consensus method.
+This would make sense.
+The plot below shows the sum of edgeR and scDD loss of FDR control
+vs the consensus FDR control.
+
+```{r, fig.height=5}
+sums <- FDRs[method != "consensus", 
+             .(FDR.01 = sum(FDR.01), FDR.05 = sum(FDR.05), FDR.10 = sum(FDR.10)), 
+             by = .(DiffDistr, Simulation)]
+sums <- melt(sums, 1:2, 3:5, "pred", "sum_edgeRscDD")
+cons <- FDRs[method == "consensus", .(FDR.01, FDR.05, FDR.10),
+             by = .(DiffDistr, Simulation)]
+cons <- melt(cons, 1:2, 3:5, "pred", "consensus")
+sums$consensus <- cons$consensus
+ggplot(sums) +
+  geom_abline(slope = 1, color = "gray", linetype = 2) +
+  geom_point(aes(x = sum_edgeRscDD, y = consensus, color = Simulation)) +
+  facet_grid(~ DiffDistr) +
+  theme_bw()
+```
+
+
+
+
+
+
+
+
+
+
+
+***
+
+
+
+
+
+
+
+
+
+
+
+
+# Session Info
+
+```{r}
+sessionInfo()
+```
+
+
+
