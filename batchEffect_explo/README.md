@@ -35,7 +35,7 @@ After the above step, results are gathered and pre-processed,
 and different models are fit to predict the loss of FDR control from the
 parameters estimated form the datasets.
 This is done for scDD using pooled cells and the Kolmogorov-Smirnov test,
-and for edgeR using summed up cells.
+and for edgeR using summed up batches.
 
     Rscript -e 'rmarkdown::render("pre.Rmd")'
     Rscript -e 'rmarkdown::render("model_scDD.Rmd")'
@@ -43,7 +43,7 @@ and for edgeR using summed up cells.
 
 Some of the models require hyper parameter tuning,
 which is why the respective scripts might run over 1 hour.
-Each of them will create a html report.
+Each of them will create a html report and several  *rds* files.
 
 **Packages**
 

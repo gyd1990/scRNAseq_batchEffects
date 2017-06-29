@@ -61,7 +61,7 @@ Predictor variables.
 
 ```{r}
 feats <- c("n_hat", "cv_hat_within", "cv_hat_between", 
-           "kBET_rate", "batch_corrs")
+           "kBET_rate", "batch_corrs", "predFDR")
 ```
 
 
@@ -136,10 +136,7 @@ summary(fit2)
 The reduced model actually has a higher cross validated R squared.
 $kBET_{rate}$ was removed from the set of features.
 
-The model included interaction terms $\hat n * \hat{cv}_{between}$,
-$\hat n * \hat{cv}_{within}$, $\hat n * batch_{corrs}$, 
-$\hat{cv}_{between} *batch_{corrs}$, and
-$\hat{cv}_{between} * \hat{cv}_{within}$.
+The model included some interaction terms.
 Though $\hat{cv}_{between} *batch_{corrs}$ seems questionable with coefficients
 over 100; These terms are highly correlated.
 
@@ -207,32 +204,31 @@ plotmo(mars.mod, pmethod = "partdep", nrug = "density",
 
 Next, I try to fit a generalized additive model (gam) to the data.
 I will use the `mgcv` package from Simon Wood for this.
-I hope to decrease the standard error furthermore.
 
-My strategy here is a backwards selection.
-I started with a full model with a maximum degree of 2 using 
-thin plate regression splines for single terms and cubic regression spline
-tensor products for interaction terms.
-The arbitrary default values for `k` (dimensions of the basis)
-were used.
+My strategy here is a backwards selection starting form a full model with
+many effective degrees of freedom (`k`) and maximum degree 2 interactions.
+For single variables thin-plate regression splines, for more variables
+natural cubic regression splines of tensor products is used as basis expansion.
 Parameter estimation is done via *Maximum Likelihood* as recommended in the
 documentation (for backwards selection).
-In the model below I already deleted all terms which where not significant.
-(below 5\%)
+In the model below I already deleted all terms which where not significant 
+(below 5\%) and `k` was reduced without decreasing adjusted R squared.
 
 ```{r}
 dt <- cbind(Xtrain, Ytrain)
 names(dt)[ncol(dt)] <- "D_FDR"
 fit <- gam(
   D_FDR ~ 
-    s(n_hat) +
-    s(cv_hat_within) +
-    s(cv_hat_between) +
-    s(batch_corrs) +
-    ti(n_hat, cv_hat_between) +
-    ti(n_hat, batch_corrs) +
-    ti(cv_hat_within, batch_corrs) +
-    ti(cv_hat_between, batch_corrs),
+    s(n_hat, k = 10) +
+    s(cv_hat_within, k = 10) +
+    s(batch_corrs, k = 10) +
+    s(predFDR, k = 3) +
+    ti(predFDR, n_hat, k = 3) +
+    ti(predFDR, cv_hat_between, k = 3) +
+    ti(cv_hat_between, n_hat, k = 7) +
+    ti(batch_corrs, n_hat, k = 7) +
+    ti(batch_corrs, cv_hat_between, k = 7) +
+    ti(cv_hat_within, cv_hat_between, k = 7),
   data = dt,
   method = "ML"
 )
@@ -247,43 +243,41 @@ par(mfrow = c(2, 2))
 gam.check(fit)
 ```
 
-Increasing `k` for interaction terms helped only a little but also substantially
-increased the fitting time.
+**Reduced**
 
-**Three-way Interaction**
-
-Next, I tried out adding an interaction term for 
-$\hat n * \hat{cv}_{within} * batch_{corrs}$.
+I further reduced the degrees of freedom while keeping R squared above 0.933.
 
 ```{r}
 fit2 <- gam(
   D_FDR ~ 
-    s(n_hat) +
-    s(cv_hat_within) +
-    s(cv_hat_between) +
-    s(batch_corrs) +
-    ti(n_hat, cv_hat_between) +
-    ti(n_hat, batch_corrs) +
-    ti(cv_hat_within, batch_corrs) +
-    ti(cv_hat_between, batch_corrs) +
-    ti(n_hat, cv_hat_within, batch_corrs),
+    s(n_hat, k = 5) +
+    s(cv_hat_within, k = 5) +
+    s(batch_corrs, k = 5) +
+    s(predFDR, k = 3) +
+    ti(predFDR, n_hat, k = 3) +
+    ti(predFDR, cv_hat_between, k = 3) +
+    ti(cv_hat_between, n_hat, k = 6) +
+    ti(batch_corrs, n_hat, k = 5) +
+    ti(batch_corrs, cv_hat_between, k = 7) +
+    ti(cv_hat_within, cv_hat_between, k = 5),
   data = dt,
   method = "ML"
 )
 summary(fit2)
 ```
 
-The model above can be reduced by using a full tensor product of the
-3-way interaction term.
-I did this below, which revealed other unsignificant terms.
-The final model is shown below.
+If I include a 3-way interaction term as full tensor product (`te`)
+I can remove many terms.
 
 ```{r}
 fit3 <- gam(
   D_FDR ~ 
-    ti(n_hat, cv_hat_between) +
-    ti(cv_hat_between, batch_corrs) +
-    te(n_hat, cv_hat_within, batch_corrs),
+    s(cv_hat_within, k = 5) +
+    s(batch_corrs, k = 5) +
+    ti(batch_corrs, n_hat, k = 5) +
+    ti(batch_corrs, cv_hat_between, k = 7) +
+    ti(cv_hat_within, cv_hat_between, k = 5) +
+    te(n_hat, cv_hat_between, predFDR, k = 3),
   data = dt,
   method = "ML"
 )
@@ -307,11 +301,11 @@ As suggested in the `mgcv` vignette I will use the AIC for model selection.
 AIC(fit, fit2, fit3)
 ```
 
-Thereafter, the reduced model using the 3-way interaction term will be used.
+Thereafter, the full model will be used.
 A partial dependency plot is shown below.
 
 ```{r, message=FALSE, warning=FALSE}
-gam.mod <- fit3
+gam.mod <- fit
 plotmo(gam.mod, pmethod = "partdep", nrug = "density",
        pt.col = 1, smooth.col = 2, ndiscrete = 0)
 ```
@@ -341,9 +335,11 @@ very accurate.
 Overfitting is avoided by subsampling and explicit regularization.
 I will use the `xgboost` implementation.
 
+As $kBET_{rate}$ was removed by the other models I will also leave it out here.
+
 ```{r}
 dtrain <- xgb.DMatrix(
-  data = as.matrix(Xtrain[, feats, with = FALSE]), 
+  data = as.matrix(Xtrain[, feats[-4], with = FALSE]), 
   label = Ytrain
 )
 ```
@@ -364,9 +360,12 @@ train.grid <- function(train, pars, n = 100000, objFun = NULL, nstop = 1000) {
   N <- nrow(pars)
   rmse <- data.frame(iter = integer(N), mean = numeric(N), sd = numeric(N))
   for (i in seq_len(N)) {
+    if (i %% 50 == 1) print(sprintf("Starting %d of %d", i, N))
+    sink("/dev/null")
     fit <- xgb.cv(params = lapply(pars, function(x) x[i]), data = train, 
                   nrounds = n, nfold = 5, obj = objFun, 
                   early_stopping_rounds = nstop, nthread = 4)
+    sink()
     dt <- fit$evaluation_log
     idx <- which.min(dt$test_rmse_mean)
     rmse$iter[i] <- idx
@@ -397,7 +396,7 @@ pars.grid1 <- expand.grid(
 )
 ```
 
-```{r grid1, results='hide'}
+```{r grid1.1}
 res <- train.grid(dtrain, pars.grid1)
 ```
 
@@ -430,7 +429,7 @@ pars.grid2 <- expand.grid(
 )
 ```
 
-```{r grid2, results='hide'}
+```{r grid1.2}
 res <- train.grid(dtrain, pars.grid2)
 ```
 
@@ -469,7 +468,7 @@ parsl <- list(
 The final model is fitted below.
 
 ```{r}
-fit <- xgb.train(params = parsl, data = dtrain, nrounds = best$iter, nfold = 5)
+xgb.mod <- xgb.train(params = parsl, data = dtrain, nrounds = best$iter)
 ```
 
 Below you can see a ranking of feature importance.
@@ -477,92 +476,181 @@ It is based on the number of occurences and their individual impacts of
 a feature in partitions of the tree ensemble.
 
 ```{r}
-dt <- xgb.importance(colnames(dtrain), fit)
+dt <- xgb.importance(colnames(dtrain), xgb.mod)
 xgb.plot.importance(dt)
 ```
 
-**Reduced Model**
-
-Since $kBET_{rate}$ has the lowest score, I will remove it.
-Feature, $\hat_{cv}_{between}$ has a high score but it is highly correlated with
-$batch_{corrs}$.
-It might be ok to remove it as well.
-
-```{r}
-dtrain <- xgb.DMatrix(
-  data = as.matrix(Xtrain[, feats[-4], with = FALSE]), 
-  label = Ytrain
-)
-```
-
-I will use a hyper parameter tuning procedure as above.
-
-```{r}
-set.seed(42)
-pars.grid1 <- expand.grid(
-  eta = 0.01, # learning rate
-  gamma = runif(5, max = .1), # minimum RMSE increase for partiion
-  max_depth = sample(1:12, 5), # maximum partiions
-  min_child_weight = sample(1:(nrow(dtrain) / 10), 5), # minimum partition
-  alpha = 0, # L1 regularization
-  subsample = .5, # row subsampling
-  colsample_bytree = .5 # column subsampling
-)
-```
-
-```{r grid1, results='hide'}
-res <- train.grid(dtrain, pars.grid1)
-```
-
-Below is the parameter combination with the best cross validated mean RMSE
-and a 3d plot of the joint distribution of hyper parameters and mean RMSE.
-
-```{r}
-rmse1 <- setDT(cbind(res, pars.grid1))
-(best1 <- rmse1[which.min(mean), ])
-scatterplot3d(rmse1$min_child_weight, rmse1$gamma, rmse1$mean, 
-              color = rmse1$max_depth, angle = 60, pch = 20, type = "h")
-md <- sort(unique(rmse1$max_depth))
-legend("topleft", title = "max_depth", bty = "n", legend = md, fill = md)
-```
-
-Now regularization hyper parameters are tested: 
-Lasso regularization for weights, row subsampling and 
-column (feature) subsampling for each tree.
-
-```{r}
-set.seed(42)
-pars.grid2 <- expand.grid(
-  eta = 0.01, # learning rate
-  gamma = best1$gamma, # minimum RMSE increase for partiion
-  max_depth = best1$max_depth, # maximum partiions
-  min_child_weight = best1$min_child_weight, # minimum partition
-  alpha = runif(5, max = .5), # L1 regularization
-  subsample = runif(5, min = .1, max = .5), # row subsampling
-  colsample_bytree = runif(3, min = .3, max = .5) # column subsampling
-)
-```
-
-```{r grid2, results='hide'}
-res <- train.grid(dtrain, pars.grid2)
-```
-
-```{r}
-rmse2 <- setDT(cbind(res, pars.grid2))
-(best2 <- rmse2[which.min(mean), ])
-```
 
 
-```{r}
-rmse <- rbind(rmse1, rmse2)
-(best.red <- rmse[which.min(mean), ])
-best
-```
+
+
+
+
+
+
 
 
 
 
 ***
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+# Evaluation
+
+Evaluation of the 3 models is done on the test set, 
+which was not used during training or validation.
+
+```{r}
+mars.pred <- predict(mars.mod, Xtest[, feats[-4], with = FALSE])
+gam.pred <- predict(gam.mod, Xtest)
+dtest <- xgb.DMatrix(data = as.matrix(Xtest[, feats[-4], with = FALSE]))
+xgb.pred <- predict(xgb.mod, dtest)
+```
+
+The residuals of all models are shown below 
+together with cubic regression splines.
+In general most residuals are quite small and values near $D_{FDR} = 0$ and
+$D_{FDR} = 1$ are fitted well.
+However, there are many values -- especially around $0.2 < D_{FDR} < 0.7$ --
+with large residuals.
+From the standard errors it seems that these values are the minority.
+Nevertheless, there is clearly a structure visible not caputred by any model.
+
+```{r, warning=FALSE}
+dt <- data.table(
+  D_FDR = rep(Ytest, 3),
+  residual = c(Ytest - mars.pred[, 1], Ytest - gam.pred, Ytest - xgb.pred),
+  model = rep(c("MARS", "GAM", "XGBoost"), each = length(Ytest))
+)
+ggplot(dt, aes(x = D_FDR, y = residual)) +
+  geom_point(aes(color = model), alpha = .3, size = 1) +
+  geom_smooth(aes(color = model, fill = model)) +
+  theme_bw()
+```
+
+Standard errors are calculated and shown below.
+Basically, it would be more useful to know the standard error in the range of
+$0 \le D_{FDR} \le 0.1$ since the scDD method would not be used if it's
+predicted FDR is more than 10% off.
+We included the standard error only considering this range.
+
+```{r}
+err <- rbind(
+  dt[, .(se = sd(residual) / sqrt(length(residual))), by = model],
+  dt[D_FDR < 0.1, .(se = sd(residual) / sqrt(length(residual))), by = model]
+)
+err$D_FDR <- rep(c("full", "below 10%"), each = 3)
+ggplot(err, aes(x = model, y = se)) +
+  geom_pointrange(aes(ymin = 0, ymax = se), color = "blue") +
+  coord_flip() +
+  facet_grid(D_FDR ~ .) +
+  theme_bw()
+(err)
+```
+
+The MARS model is the worst, the tree ensemble is slightly better than 
+the generalized additive model.
+For predicting the loss of FDR control both XGBoost and GAM are near 0.003
+standard error.
+Confidence intervals for below 10% FDR control loss are shown below.
+
+```{r}
+err[D_FDR == "below 10%", .(CI.99 = 2.58 * se, CI.95 = 1.96 * se), by = model]
+```
+
+XGBoost is the best but it is also the substantially most complex model.
+The GAM is much smaller and easier to interpret.
+I will continue with both.
+
+
+
+
+
+
+
+
+
+
+
+
+***
+
+
+
+
+
+
+
+
+
+
+
+
+
+# Save
+
+Now the final models are trained on the whole dataset and saved.
+
+**GAM**
+
+```{r}
+gam.mod <- gam(
+  D_FDR ~ 
+    ti(n_hat, cv_hat_between) +
+    ti(cv_hat_between, batch_corrs) +
+    te(n_hat, cv_hat_within, batch_corrs),
+  data = FDR,
+  method = "ML"
+)
+saveRDS(gam.mod, "scDD_gam.mod.rds")
+```
+
+**XGBoost**
+
+```{r}
+dtrain <- xgb.DMatrix(
+  data = as.matrix(FDR[, feats[-4], with = FALSE]), 
+  label = FDR$D_FDR
+)
+xgb.mod <- xgb.train(params = parsl, data = dtrain, nrounds = best$iter)
+saveRDS(xgb.mod, "scDD_xgb.mod.rds")
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+***
+
+
 
 
 
