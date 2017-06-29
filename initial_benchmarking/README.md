@@ -2,9 +2,9 @@
 
 There are already many benchmarkings concerning differential expression in scRNA-seq data. However, they are missing at least of one the following points.
 
-1. Many benchmarkings do not test most recent methods (like scDD, D3E, BPSC).
-2. They test differential means but not other kinds of differential distributions (as elaborated in Korthauer (2016) for example).
-3. They test one group vs another without introducing a batch effect. However, batch effects in single cell data are substantial according to Hicks (2015) and Tung (2016).
+1. Most recents methods (e.g. scDD, D3E, BPSC) are not tested.
+2. Only the ability to detect different means in distributions is tested. However scRNA-seq data offers much more information (e.g. Korthauer, 2016).
+3. Batch effects are not investigated. However, single cell data is often confounded with batches and their effects are substantial (e.g. Hicks, 2015 and Tung, 2016).
 
 All details are given [here](http://b210-research.dkfz.de/computational-genome-biology/scRNAseq/initial_benchmarking/).
 
