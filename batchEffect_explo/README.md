@@ -1,12 +1,13 @@
 # Batch Effect Exploration
 
-Please find the code on [github](https://github.com/mRcSchwering/scRNAseq_batchEffects/tree/master/batchEffect_explo).
-Clone the repository.
-The code for this experiment is in *batchEffect_explo*.
-
-    git clone https://github.com/mRcSchwering/scRNAseq_batchEffects
-    cd scRNAseq_batchEffects/batchEffect_explo/
-
+In the previous benchmarking scDD using pooled cells and the KS test
+and edgeR using summed up batches turned out to be interesting.
+edgeR holds FDR control even with strong bach effects but is not very powerful.
+It can only detect differential means between distributions.
+scDD is quite powerful as it can also detect differently shaped distributions.
+It is quite robust to batch effects, however loses FDR control if the batch effect is too strong.
+Here, we simulate and analyse many different scenarios to predict FDR control from a given dataset.
+All details are given [here](http://b210-research.dkfz.de/computational-genome-biology/scRNAseq/batchEffect_explo/).
 
 ## Reproduce Simulations
 
