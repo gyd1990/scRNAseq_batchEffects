@@ -72,11 +72,13 @@ In case a simulation failed, a placeholder of NaNs is entered.
 ```{r, warning=FALSE}
 placeholder <- list(
   n_hat = NaN, 
-  sig_hat_within = NaN, 
-  sig_hat_between = NaN,
+  cv_hat_within = NaN, 
+  cv_hat_between = NaN,
   kBET_rate = NaN,
   kBET_pVal = NaN,
-  batch_corrs = NaN
+  batch_corrs = NaN,
+  median_count = NaN,
+  mean_count = NaN
 )
 l <- lapply(paths, function(x) {
   tryCatch(readRDS(file.path(x, "results", "estimates.rds")),
@@ -153,11 +155,13 @@ for (i in seq_along(l)) {
   l[[i]]$c <- estimates1[i, c]
   l[[i]]$sim <- estimates1[i, sim]
   l[[i]]$n_hat <- estimates1[i, n_hat]
-  l[[i]]$sig_hat_within <- estimates1[i, sig_hat_within]
-  l[[i]]$sig_hat_between <- estimates1[i, sig_hat_between]
+  l[[i]]$cv_hat_within <- estimates1[i, cv_hat_within]
+  l[[i]]$cv_hat_between <- estimates1[i, cv_hat_between]
   l[[i]]$kBET_rate <- estimates1[i, kBET_rate]
   l[[i]]$kBET_pVal <- estimates1[i, kBET_pVal]
   l[[i]]$batch_corrs <- estimates1[i, batch_corrs]
+  l[[i]]$median_count <- estimates1[i, median_count]
+  l[[i]]$mean_count <- estimates1[i, mean_count]
   if (nrow(l[[i]]) < 1) stop(i)
 }
 AUC1 <- do.call(rbind, l)
@@ -195,11 +199,13 @@ for (i in seq_along(l)) {
   l[[i]]$c <- estimates1[i, c]
   l[[i]]$sim <- estimates1[i, sim]
   l[[i]]$n_hat <- estimates1[i, n_hat]
-  l[[i]]$sig_hat_within <- estimates1[i, sig_hat_within]
-  l[[i]]$sig_hat_between <- estimates1[i, sig_hat_between]
+  l[[i]]$cv_hat_within <- estimates1[i, cv_hat_within]
+  l[[i]]$cv_hat_between <- estimates1[i, cv_hat_between]
   l[[i]]$kBET_rate <- estimates1[i, kBET_rate]
   l[[i]]$kBET_pVal <- estimates1[i, kBET_pVal]
   l[[i]]$batch_corrs <- estimates1[i, batch_corrs]
+  l[[i]]$median_count <- estimates1[i, median_count]
+  l[[i]]$mean_count <- estimates1[i, mean_count]
   if (nrow(l[[i]]) < 1) stop(i)
 }
 FDR1 <- do.call(rbind, l)
@@ -246,11 +252,13 @@ In case a simulation failed, NaNs are entered.
 ```{r, warning=FALSE}
 placeholder <- list(
   n_hat = NaN, 
-  sig_hat_within = NaN, 
-  sig_hat_between = NaN,
+  cv_hat_within = NaN, 
+  cv_hat_between = NaN,
   kBET_rate = NaN,
   kBET_pVal = NaN,
-  batch_corrs = NaN
+  batch_corrs = NaN,
+  median_count = NaN,
+  mean_count = NaN
 )
 l <- lapply(paths, function(x) {
   tryCatch(readRDS(file.path(x, "results", "estimates.rds")),
@@ -327,11 +335,13 @@ for (i in seq_along(l)) {
   l[[i]]$c <- estimates2[i, c]
   l[[i]]$sim <- estimates2[i, sim]
   l[[i]]$n_hat <- estimates2[i, n_hat]
-  l[[i]]$sig_hat_within <- estimates2[i, sig_hat_within]
-  l[[i]]$sig_hat_between <- estimates2[i, sig_hat_between]
+  l[[i]]$cv_hat_within <- estimates2[i, cv_hat_within]
+  l[[i]]$cv_hat_between <- estimates2[i, cv_hat_between]
   l[[i]]$kBET_rate <- estimates2[i, kBET_rate]
   l[[i]]$kBET_pVal <- estimates2[i, kBET_pVal]
   l[[i]]$batch_corrs <- estimates2[i, batch_corrs]
+  l[[i]]$median_count <- estimates2[i, median_count]
+  l[[i]]$mean_count <- estimates2[i, mean_count]
   if (nrow(l[[i]]) < 1) stop(i)
 }
 AUC2 <- do.call(rbind, l)
@@ -369,11 +379,13 @@ for (i in seq_along(l)) {
   l[[i]]$c <- estimates2[i, c]
   l[[i]]$sim <- estimates2[i, sim]
   l[[i]]$n_hat <- estimates2[i, n_hat]
-  l[[i]]$sig_hat_within <- estimates2[i, sig_hat_within]
-  l[[i]]$sig_hat_between <- estimates2[i, sig_hat_between]
+  l[[i]]$cv_hat_within <- estimates2[i, cv_hat_within]
+  l[[i]]$cv_hat_between <- estimates2[i, cv_hat_between]
   l[[i]]$kBET_rate <- estimates2[i, kBET_rate]
   l[[i]]$kBET_pVal <- estimates2[i, kBET_pVal]
   l[[i]]$batch_corrs <- estimates2[i, batch_corrs]
+  l[[i]]$median_count <- estimates2[i, median_count]
+  l[[i]]$mean_count <- estimates2[i, mean_count]
   if (nrow(l[[i]]) < 1) stop(i)
 }
 FDR2 <- do.call(rbind, l)
@@ -393,25 +405,6 @@ rm(estimates1, estimates2, noCall1, noCall2, AUC1, AUC2, FDR1, FDR2)
 gc()
 ```
 
-**Rename Features**
-
-Actually $\hat\sigma$ should be $\hat{cv}$.
-I will correct this first.
-
-```{r}
-names(estimates) <- c("n", "b", "g", "c", "sim", "n_hat", "cv_hat_within", 
-                      "cv_hat_between", "kBET_rate", "kBET_pVal", "batch_corrs")
-names(noCall) <- c("n", "b", "g", "c", "sim", "n_hat", "cv_hat_within", 
-                   "cv_hat_between", "kBET_rate", "kBET_pVal", "batch_corrs", 
-                   "edgeR_sum", "scDD_pool_ks", "DESeq2_sum", "consensus_edgeR", 
-                   "consensus_DESeq2")
-names(AUC) <- c("method", "AUC", "type", "n", "b", "g", "c", "sim", "n_hat", 
-                "cv_hat_within", "cv_hat_between", "kBET_rate", "kBET_pVal", 
-                "batch_corrs")
-names(FDR) <- c("method", "trueFDR", "predFDR", "type", "n", "b", "g", "c", 
-                "sim", "n_hat", "cv_hat_within", "cv_hat_between", "kBET_rate", 
-                "kBET_pVal", "batch_corrs")
-```
 
 
 
@@ -550,7 +543,7 @@ method at a given predicted FDR.
 
 ```{r}
 feats <- c("n_hat", "cv_hat_within", "cv_hat_between", "kBET_rate", "kBET_pVal", 
-           "batch_corrs")
+           "batch_corrs", "median_count", "mean_count")
 dt <- melt(estimates, 1:5, feats, "feature", "value")
 ggplot(dt) +
   geom_histogram(aes(x = value), bins = 30) +
@@ -586,7 +579,7 @@ pairs(
 )
 ```
 
-There is strong linear correlation between $\hat{cv}_{within}$ and
+There is strong linear correlation between $\hat{cv}_{between}$ and
 $batch_{corrs}$.
 Other than that one can see non linear dependencies between features in general.
 
@@ -602,8 +595,7 @@ corrplot(m, method = "color", order = "hclust")
 ```
 
 Obviously $n$ and $\hat n$ are correlated.
-Then, $\hat{cv}_{between}$ and $batch_{corrs}$ are correlated to $b$,
-and slightly to $g$.
+Then, $\hat{cv}_{between}$ and $batch_{corrs}$ are correlated to $b$.
 So these features seem to represent the respective parameters quite well.
 
 
@@ -755,7 +747,7 @@ Here, $D_{FDR}$ is mapped to color.
 Feature $kBET_{pVal}$ is excluded since it mostly consists of zeros.
 
 ```{r}
-feats <- feats[-5]
+feats <- c(feats[-5], "predFDR")
 ```
 
 
@@ -805,12 +797,15 @@ Point density is mapped to color.
 
 ```{r, fig.height=12}
 dt <- FDR[type == "full" & method == "edgeR_sum", ]
-par(mfrow = c(3, 2))
+par(mfrow = c(3, 3))
 ScatterDensity(dt$n_hat, dt$D_FDR, "n_hat")
 ScatterDensity(dt$cv_hat_within, dt$D_FDR, "cv_hat_within")
 ScatterDensity(dt$cv_hat_between, dt$D_FDR, "cv_hat_between")
 ScatterDensity(dt$kBET_rate, dt$D_FDR, "kBET_rate")
 ScatterDensity(dt$batch_corrs, dt$D_FDR, "batch_corrs")
+ScatterDensity(dt$median_count, dt$D_FDR, "median_count")
+ScatterDensity(dt$mean_count, dt$D_FDR, "mean_count")
+ScatterDensity(dt$predFDR, dt$D_FDR, "predFDR")
 ```
 
 
@@ -818,12 +813,15 @@ ScatterDensity(dt$batch_corrs, dt$D_FDR, "batch_corrs")
 
 ```{r, fig.height=12}
 dt <- FDR[type == "full" & method == "scDD_pool_ks", ]
-par(mfrow = c(3, 2))
+par(mfrow = c(3, 3))
 ScatterDensity(dt$n_hat, dt$D_FDR, "n_hat")
 ScatterDensity(dt$cv_hat_within, dt$D_FDR, "cv_hat_within")
 ScatterDensity(dt$cv_hat_between, dt$D_FDR, "cv_hat_between")
 ScatterDensity(dt$kBET_rate, dt$D_FDR, "kBET_rate")
 ScatterDensity(dt$batch_corrs, dt$D_FDR, "batch_corrs")
+ScatterDensity(dt$median_count, dt$D_FDR, "median_count")
+ScatterDensity(dt$mean_count, dt$D_FDR, "mean_count")
+ScatterDensity(dt$predFDR, dt$D_FDR, "predFDR")
 ```
 
 

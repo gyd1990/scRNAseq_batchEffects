@@ -36,15 +36,18 @@ library(kBET) # batch effect estimation
 library(limma) # estimate robust inter-batch correlations
 
 sce <- readRDS("intermediate_data/normed.rds")
+dt <- exp(exprs(sce))
 ```
 
 Define some variables.
 Here, batches 1 to 3 belong to group 1 and the others to group 2.
 
 ```{r}
-batches <- unique(sce[[btchID]])
-groups <- unique(sce[[grpID]])
-btchIDX <- rep(1:2, each = 3)
+batches <- as.factor(sce[[btchID]])
+groups <- as.factor(sce[[grpID]])
+ubatches <- unique(batches)
+ugroups <- unique(groups)
+idxs <- list(which(groups == ugroups[1]), which(groups == ugroups[2]))
 ```
 
 
@@ -62,7 +65,7 @@ Since this is not true, the severness of this assumption should somehow be
 related to the actual number of cells per batch.
 
 ```{r}
-(n_hat <- as.vector(ncol(sce) / length(batches)))
+(n_hat <- as.vector(ncol(sce) / length(ubatches)))
 ```
 
 
@@ -77,12 +80,13 @@ We do that on the library size normalized values before log transformation.
 
 ```{r}
 cv <- function(x) sd(x) / mean(x)
-meanCVs <- numeric(length(batches))
-for (i in seq_along(batches)) {
-  x <- apply(exp(exprs(sce)[, sce[[btchID]] == batches[i]]), 1, cv)
-  meanCVs <- mean(x)
+meanCVs <- numeric(length(ubatches))
+for (i in seq_along(ubatches)) {
+  x <- apply(dt[, batches == ubatches[i]], 1, cv)
+  x[!is.finite(x)] <- NA
+  meanCVs[i] <- mean(x, na.rm = TRUE)
 }
-(sig_hat_within <- mean(meanCVs))
+(cv_hat_within <- mean(meanCVs))
 ```
 
 
@@ -94,15 +98,14 @@ These values are then averaged over genes and groups.
 We do that on the library size normalized values before log transformation.
 
 ```{r}
-CVs <- numeric(2)
-for (grp in 1:2) {
-  grpBatches <- batches[btchIDX == grp]  
-  l <- lapply(grpBatches, function(batch) {
-    rowMeans(exp(exprs(sce)[, sce[[btchID]] == batch]))
+CVs <- numeric(length(ugroups))
+for (i in seq_along(idxs)) {
+  l <- lapply(unique(batches[idxs[[i]]]), function(batch) {
+    rowMeans(dt[, batches == batch])
   })
-  CVs[grp] <- mean(apply(do.call(cbind, l), 1, cv))
+  CVs[i] <- mean(apply(do.call(cbind, l), 1, cv), na.rm = TRUE)
 }
-(sig_hat_between <- mean(CVs))
+(cv_hat_between <- mean(CVs))
 ```
 
 
@@ -120,7 +123,7 @@ We will also use non-transformed values here, as the package does not
 specify otherwise.
 
 ```{r}
-res <- kBET(t(exp(exprs(sce))), sce[[btchID]], plot = FALSE)$summary
+res <- kBET(t(dt), batches, plot = FALSE)$summary
 (kBET_rate <- res$kBET.observed[1] - res$kBET.expected[1])
 ```
 
@@ -141,13 +144,25 @@ The average is the trimmed mean of the individual correlations on the
 atanh-transformed scale.
 
 ```{r}
-corrs <- duplicateCorrelation(
-  exprs(sce), 
-  design = model.matrix(~ 1 + sce[[grpID]]), 
-  block = sce[[btchID]]
+corrs <- limma::duplicateCorrelation(
+  log(dt + 1), 
+  design = model.matrix(~ 1 + groups), 
+  block = batches
 )
 (batch_corrs <- corrs$consensus.correlation)
 ```
+
+
+# Overall Count
+
+Many methods use overall gene count as covariate.
+So I guess it's useful to measure this as well.
+
+```{r}
+(median_count <- median(as.vector(counts(sce))))
+(mean_count <- mean(as.vector(counts(sce))))
+```
+
 
 
 
@@ -161,11 +176,13 @@ Final save.
 ```{r}
 estimates <- list(
   n_hat = n_hat,
-  sig_hat_within = sig_hat_within,
-  sig_hat_between = sig_hat_between,
+  cv_hat_within = cv_hat_within,
+  cv_hat_between = cv_hat_between,
   kBET_rate = kBET_rate,
   kBET_pVal = kBET_pVal,
-  batch_corrs = batch_corrs
+  batch_corrs = batch_corrs,
+  median_count = median_count,
+  mean_count = mean_count
 )
 saveRDS(estimates, "results/estimates.rds")
 ```
@@ -174,3 +191,4 @@ saveRDS(estimates, "results/estimates.rds")
 
 
 ***
+

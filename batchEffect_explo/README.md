@@ -2,7 +2,7 @@
 
 In the previous benchmarking scDD using pooled cells and the KS test
 and edgeR using summed up batches turned out to be interesting.
-edgeR holds FDR control even with strong bach effects but is not very powerful.
+edgeR holds FDR control even with strong batch effects but is not very powerful.
 It can only detect differential means between distributions.
 scDD is quite powerful as it can also detect differently shaped distributions.
 It is quite robust to batch effects, however loses FDR control if the batch effect is too strong.
@@ -30,24 +30,21 @@ They contain html reports for quality control (*quali.html*), differential expre
 (*estimate.html*).
 The actual `sce` object of the dataset can be found in *intermediate_data*, result objects are in *results*.
 
-## Regress FDR Control
+## Predict FDR Control
 
 After the above step, results are gathered and pre-processed,
 and different models are fit to predict the loss of FDR control from the
 parameters estimated form the datasets.
-This is done for scDD using pooled cells and the Kolmogorov-Smirnov test,
-and for edgeR using summed up batches.
 
     Rscript -e 'rmarkdown::render("pre.Rmd")'
     Rscript -e 'rmarkdown::render("model_scDD.Rmd")'
-    Rscript -e 'rmarkdown::render("model_edgeR.Rmd")'
 
-Some of the models require hyper parameter tuning,
-which is why the respective scripts might run over 1 hour.
+In the second script there is a 10 times repeated 5 fold cross validation
+with an exhaustive pruning step inside, this might take a while.
 Each of them will create a html report and several  *rds* files.
 
 **Packages**
 
 Before you start, make sure you have all the `R` packages installed:
 `scran`, `scater`, `data.table`, `ggplot2`, `edgeR`, `DESeq2`, `scDD`, `SummarizedExperiment`, `rmarkdown`,
-`kBET`, `limma`, `earth`, `mgcv`, `xgboost`, `scatterplot3d`, `corrplot`, `highcharter`.
+`kBET`, `limma`, `earth`, `mda`, `corrplot`, `highcharter`.

@@ -18,7 +18,7 @@
 #
 # relative amount of differentially distributed genes is given by DDP
 # the amount of differential distribution is controlled with DDM
-seed <- 42
+seed <- 24
 
 # fixed model parameters
 NBtchs <- 3

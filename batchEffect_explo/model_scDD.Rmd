@@ -17,7 +17,8 @@ output:
 
 # Introduction
 
-In this script I try to predict the loss of FDR for scDD using pooled cells
+In this script I try to predict the loss of FDR control for scDD using
+pooled expression
 with Kolmogorov-Smirnov test.
 
 ## Load
@@ -28,9 +29,7 @@ First, libraries are loaded.
 library(ggplot2) # plotting
 library(data.table) # database-like tables
 library(earth) # MARS
-library(mgcv) # GAM
-library(xgboost) # gradient boosting
-library(scatterplot3d) # 3d plots
+library(mda) # fda
 ```
 
 Objects were prepared in the pre-processing step and are loaded.
@@ -41,27 +40,18 @@ FDR <- readRDS("FDR.rds")
 noCall <- readRDS("noCall.rds")
 ```
 
-## Split Data
-
-1/3 split into train and test.
-The training set will be used for model fitting and evaluation
-while the test set will be used for prediction error estimation.
+## Data
 
 ```{r}
-FDR <- FDR[method == "scDD_pool_ks" & type == "full", ]
-set.seed(42)
-split <- sample(1:3, nrow(FDR), replace = TRUE)
-Xtrain <- FDR[split %in% 1:2, !"D_FDR"]
-Xtest <- FDR[split == 3, !"D_FDR"]
-Ytrain <- FDR[split %in% 1:2, D_FDR]
-Ytest <- FDR[split == 3, D_FDR]
+X <- FDR[method == "scDD_pool_ks" & type == "full", !"D_FDR"]
+Y <- FDR[method == "scDD_pool_ks" & type == "full", D_FDR]
 ```
 
-Predictor variables.
+Predictor variables are stored in a vector.
 
 ```{r}
-feats <- c("n_hat", "cv_hat_within", "cv_hat_between", 
-           "kBET_rate", "batch_corrs", "predFDR")
+feats <- c("n_hat", "cv_hat_within", "cv_hat_between",
+           "kBET_rate", "batch_corrs", "predFDR", "median_count", "mean_count")
 ```
 
 
@@ -93,227 +83,149 @@ feats <- c("n_hat", "cv_hat_within", "cv_hat_between",
 
 
 
-# Training
-
-## MARS
+# Regression via MARS
 
 A Multivariate  Adaptive Regression Splines (MARS) model is fit to the data.
 As there are not too many variables and the dataset is not so big,
-an exhaustive term selection is done during the pruning method and repeated
+an exhaustive term selection can be used during the pruning method and repeated
 cross validation is used to estimate R squared.
 The method is forced to stop during the forward pass if the estimated R squared
-does not increase by 0.001. 
+does not increase by 0.005.
+This leads to including a little less than 30 terms during the forward pass.
 Interaction terms are allowed if the respective first degree terms are already
 in the model.
 
+## Fitting
+
+We only focus on the observations below 20\% FDR loss.
+This is where the model should be reliable.
+This could be done by weighting, but the MARS is painfully slow using weights.
+A more rigorous way is to just exclude the datapoints above
+20\% FDR loss.
+
+```{r}
+incl <- ifelse(Y > 0.2, FALSE, TRUE)
+table(incl)
+```
+
 ```{r, results='hide'}
-fit <- earth(Xtrain[, feats, with = FALSE], Ytrain,
-             degree = 2, nk = 100, thresh = 0.001,
-             pmethod = "exhaustive", nfold = 5, ncross = 10)
+fit <- earth(X[incl, feats, with = FALSE], Y[incl],
+             degree = 2, nk = 100, thresh = 0.005,
+             pmethod = "exhaustive", nfold = 5, ncross = 30)
 ```
 
 ```{r}
 summary(fit)
 ```
 
-**Reduced**
-
-Next I try to reduce the model by removing features.
-I do this in a backwards selection fashion.
-Below is the model that yielded a cross validated R squared
-within 1 standard deviation of the full model.
-
-```{r, results='hide'}
-fit2 <- earth(Xtrain[, feats[-4], with = FALSE], Ytrain,
-             degree = 2, nk = 100, thresh = 0.001,
-             pmethod = "exhaustive", nfold = 5, ncross = 10)
-```
-
-```{r}
-summary(fit2)
-```
-
-The reduced model actually has a higher cross validated R squared.
-$kBET_{rate}$ was removed from the set of features.
-
-The model included some interaction terms.
-Though $\hat{cv}_{between} *batch_{corrs}$ seems questionable with coefficients
-over 100; These terms are highly correlated.
-
-In a third model I want to exclude these questionable interactions with the 
-function below.
+There is a ridiculously high interaction term between $batch_{corrs}$
+and $\hat{cv}_{within}$.
+They are correlated.
+For the next runs I will supress interaction terms of these two variables.
 
 ```{r}
 allowed <- function(degree, pred, parents, namesx) {
   if (degree < 2) return(TRUE)
-  idx1 <- which(namesx == "cv_hat_between")
+  idx1 <- which(namesx == "cv_hat_within")
   idx2 <- which(namesx == "batch_corrs")
   if ((pred == idx1 && parents[idx2]) || (pred == idx2 && parents[idx1])) {
     return(FALSE)
   }
-  return(TRUE)
+  TRUE
 }
 ```
 
 ```{r, results='hide'}
-fit3 <- earth(Xtrain[, feats[-4], with = FALSE], Ytrain, 
-             degree = 2, nk = 100, thresh = 0.001, allowed = allowed,
-             pmethod = "exhaustive", nfold = 5, ncross = 10)
+fit2 <- earth(X[incl, feats, with = FALSE], Y[incl],
+             degree = 2, nk = 100, thresh = 0.005, allowed = allowed,
+             pmethod = "exhaustive", nfold = 5, ncross = 30)
 ```
 
 ```{r}
-summary(fit3)
-```
-
-The cross validated error is still within 1 standard deviation of the best
-model and the rediculously high coefficients are gone.
-
-**Final Model**
-
-The last fit is used as final model.
-
-```{r}
-mars.mod <- fit3
-plot(mars.mod)
-```
-
-Most residuals are below 0.1, which would be 10% error in the prediction 
-of FDR control loss.
-Unfortunately, most values are around 0 and 1, and the values in between
-are predicted quite quite bad.
-
-Partial dependency plots of the mdoel are shown below.
-
-```{r, message=FALSE, warning=FALSE}
-plotmo(mars.mod, pmethod = "partdep", nrug = "density",
-       pt.col = 1, smooth.col = 2, ndiscrete = 0)
-```
-
-
-
-
-
-
-
-
-
-
-
-
-## GAM
-
-Next, I try to fit a generalized additive model (gam) to the data.
-I will use the `mgcv` package from Simon Wood for this.
-
-My strategy here is a backwards selection starting form a full model with
-many effective degrees of freedom (`k`) and maximum degree 2 interactions.
-For single variables thin-plate regression splines, for more variables
-natural cubic regression splines of tensor products is used as basis expansion.
-Parameter estimation is done via *Maximum Likelihood* as recommended in the
-documentation (for backwards selection).
-In the model below I already deleted all terms which where not significant 
-(below 5\%) and `k` was reduced without decreasing adjusted R squared.
-
-```{r}
-dt <- cbind(Xtrain, Ytrain)
-names(dt)[ncol(dt)] <- "D_FDR"
-fit <- gam(
-  D_FDR ~ 
-    s(n_hat, k = 10) +
-    s(cv_hat_within, k = 10) +
-    s(batch_corrs, k = 10) +
-    s(predFDR, k = 3) +
-    ti(predFDR, n_hat, k = 3) +
-    ti(predFDR, cv_hat_between, k = 3) +
-    ti(cv_hat_between, n_hat, k = 7) +
-    ti(batch_corrs, n_hat, k = 7) +
-    ti(batch_corrs, cv_hat_between, k = 7) +
-    ti(cv_hat_within, cv_hat_between, k = 7),
-  data = dt,
-  method = "ML"
-)
-summary(fit)
-```
-
-The plots and the statistic below shows that there is still a lot of structure
-left which is captured by the model.
-
-```{r}
-par(mfrow = c(2, 2))
-gam.check(fit)
-```
-
-**Reduced**
-
-I further reduced the degrees of freedom while keeping R squared above 0.933.
-
-```{r}
-fit2 <- gam(
-  D_FDR ~ 
-    s(n_hat, k = 5) +
-    s(cv_hat_within, k = 5) +
-    s(batch_corrs, k = 5) +
-    s(predFDR, k = 3) +
-    ti(predFDR, n_hat, k = 3) +
-    ti(predFDR, cv_hat_between, k = 3) +
-    ti(cv_hat_between, n_hat, k = 6) +
-    ti(batch_corrs, n_hat, k = 5) +
-    ti(batch_corrs, cv_hat_between, k = 7) +
-    ti(cv_hat_within, cv_hat_between, k = 5),
-  data = dt,
-  method = "ML"
-)
 summary(fit2)
 ```
 
-If I include a 3-way interaction term as full tensor product (`te`)
-I can remove many terms.
+Median count does not seem to be so useful, so I will remove it.
+In the following I also tried to remove $batch_{corrs}$ and $kBET_{rate}$
+without losing to much performance (CVRsq).
+Creating these 2 features is computationally expensive.
+This could be really inconvenient on large datasets.
+So it would save a lot of time if I can omit them.
+Below is the model without $kBET_{rate}$ and median count.
+
+```{r, results='hide'}
+fit3 <- earth(X[incl, feats[c(-4, -7)], with = FALSE], Y[incl],
+             degree = 2, nk = 100, thresh = 0.005, allowed = allowed,
+             pmethod = "exhaustive", nfold = 5, ncross = 30)
+```
 
 ```{r}
-fit3 <- gam(
-  D_FDR ~ 
-    s(cv_hat_within, k = 5) +
-    s(batch_corrs, k = 5) +
-    ti(batch_corrs, n_hat, k = 5) +
-    ti(batch_corrs, cv_hat_between, k = 7) +
-    ti(cv_hat_within, cv_hat_between, k = 5) +
-    te(n_hat, cv_hat_between, predFDR, k = 3),
-  data = dt,
-  method = "ML"
-)
 summary(fit3)
+plot(fit3)
 ```
 
-The statistics shown below still indicates that there is some unexplained
-structure left.
-However, increasing `k` merely helped, while fitting time exploded.
+The residuals show some structure.
+This is something I cannot get rid of.
+I also tried out other model families (gam and xgboost).
+They all lead to the same residuals plot.
+Either the data is just too noisy or I am missing a feature.
+
+I can fit the other part of the data quite well (the $D_{FDR} > 0.2$ part),
+but that is not really useful.
+Eventually, one would want to know whether or not scDD can be used,
+so $|D_{FDR}|$ near 0 is important.
+
+## Estimated Prediction Error
+
+At this point I want to know how good I can infer with these models.
+For that I can fit a model to the residuals,
+and estimate the confidence intervals for future predictions.
+Fortunately, this is already implemented in `earth` as a variance model.
+
+From the residual plot above it seems that the variance of the
+absolute residuals increases and falls with the response going from 0 to 0.2.
+So, I will fit a MARS to the residuals (as well).
+The plot below shows the 95\% confidence intervals in gray, and the respective
+prediction intervals in red.
+
+```{r, results='hide'}
+fit3 <- earth(X[incl, feats[c(-4, -7)], with = FALSE], Y[incl],
+             degree = 2, nk = 100, thresh = 0.005, allowed = allowed,
+             pmethod = "exhaustive", nfold = 5, ncross = 30,
+             varmod.method = "earth")
+```
 
 ```{r}
-par(mfrow = c(2, 2))
-gam.check(fit3)
+plot(fit3, 3, level = .95)
 ```
 
-**Final Model**
+Now it would be handy to remove $batch_{corrs}$ because all the
+features left are cheap to compute.
+So, below I want to see  how bad the prediction intervals get when
+I remove $batch_{corrs}$.
 
-As suggested in the `mgcv` vignette I will use the AIC for model selection.
+```{r, results='hide'}
+fit4 <- earth(X[incl, feats[c(-4, -5, -7)], with = FALSE], Y[incl],
+             degree = 2, nk = 100, thresh = 0.005,
+             pmethod = "exhaustive", nfold = 5, ncross = 30,
+             varmod.method = "earth")
+```
 
 ```{r}
-AIC(fit, fit2, fit3)
+plot(fit4, 3, level = .95)
 ```
 
-Thereafter, the full model will be used.
-A partial dependency plot is shown below.
-
-```{r, message=FALSE, warning=FALSE}
-gam.mod <- fit
-plotmo(gam.mod, pmethod = "partdep", nrug = "density",
-       pt.col = 1, smooth.col = 2, ndiscrete = 0)
-```
+The error is similar but still,
+the prediction error ranges from 5\% to 10\% (95\% confidence).
+In the best case such a prediction could be used in a "yes" or "no"
+manner.
 
 
 
 
 
+
+***
 
 
 
@@ -323,310 +235,315 @@ plotmo(gam.mod, pmethod = "partdep", nrug = "density",
 
 
 
+# Classification via FDA
 
-## xgboost
+It might be easier to convert this to a classification problem.
+Eventually, I want to know whether or not I can use scDD.
+The question is where to set the boundary.
 
-Finally, I want to try out a quite powerful method which creates an ensemble
-of trees.
-Here, regression trees are iteratively fitted to minimize the RMSE 
-using stochastic gradient boosting.
-Trees are quite flexible with any kind of data and their ensemble can be
-very accurate.
-Overfitting is avoided by subsampling and explicit regularization.
-I will use the `xgboost` implementation.
-
-As $kBET_{rate}$ was removed by the other models I will also leave it out here.
+As we see departures from true FDR of edgeR (our baseline here) as well,
+we could say, if scDD's loss of FDR control is reasonably higher than edgeR's
+we should not use it.
+Or one could just set it to some threshold like 10\% loss of FDR control.
+I just chose 10\% as from edgeR's results (which is kind of a baseline here)
+we also see a slight loss of FDR control somwhere around 5\% but mostly
+below 10\%.
 
 ```{r}
-dtrain <- xgb.DMatrix(
-  data = as.matrix(Xtrain[, feats[-4], with = FALSE]), 
-  label = Ytrain
+X <- X[, feats[c(-4, -5, -7)], with = FALSE]
+YedgeR <- FDR[method == "edgeR_sum" & type == "full", D_FDR]
+X$YedgeR <- abs(Y) <= abs(YedgeR)
+table(X$YedgeR)
+X$Y01 <- abs(Y) <= 0.1
+table(X$Y01)
+```
+
+Since, I was already using the MARS model, I will continue
+fitting a flexible discriminant analysis (FDA).
+Here, the basis expansion from a MARS is basically used with a discriminant
+analysis.
+
+Below I use the cases where scDD's FDR control is not worse than edgeR's
+as labels.
+To get around 30 terms during the forward pass,
+the threshold is set to 3\%.
+
+```{r, results='hide'}
+fit <- fda(
+  YedgeR ~ n_hat + cv_hat_within + cv_hat_between + predFDR + mean_count,
+  data = X, keep.fitted = TRUE, keepxy = FALSE, method = earth,
+  degree = 2, nk = 100, thresh = 0.003, pmethod = "exhaustive",
+  nfold = 5, ncross = 30
 )
 ```
 
-**Parameter Tuning**
+```{r}
+summary(fit$fit)
+post <- as.data.frame(predict(fit, X, type = "posterior"))
+hist(post$`FALSE`, breaks = 30)
+```
 
-For hyper parameter estimation I will create a function that iteratively
-trains a model with different hyper parameter combinations.
-The performance is monitored using cross validation.
-Theoretically, up to 100k trees can be built per model, but I added an early
-stopping condition which will terminate the process if for 1000 iterations
-the RMSE did not decrease.
-The model with the lowest cross validated mean RMSE will be noted for each
-parameter combination.
+From the posterior probability distribution we can see that in many cases
+the model is not sure how to classify.
+It might be worth finding a good cutoff for the classifier.
+Below is the distribution of both label instances is
+plotted along the discriminant coordinate.
 
 ```{r}
-train.grid <- function(train, pars, n = 100000, objFun = NULL, nstop = 1000) {
-  N <- nrow(pars)
-  rmse <- data.frame(iter = integer(N), mean = numeric(N), sd = numeric(N))
-  for (i in seq_len(N)) {
-    if (i %% 50 == 1) print(sprintf("Starting %d of %d", i, N))
-    sink("/dev/null")
-    fit <- xgb.cv(params = lapply(pars, function(x) x[i]), data = train, 
-                  nrounds = n, nfold = 5, obj = objFun, 
-                  early_stopping_rounds = nstop, nthread = 4)
-    sink()
-    dt <- fit$evaluation_log
-    idx <- which.min(dt$test_rmse_mean)
-    rmse$iter[i] <- idx
-    rmse$mean[i] <- dt$test_rmse_mean[idx]  
-    rmse$sd[i] <- dt$test_rmse_std[idx] 
-  }
-  return(rmse)
+vars <- predict(fit, X, type = "variates")
+df <- data.frame(
+  variate = vars[, 1],
+  label = X$YedgeR
+)
+ggplot(df) +
+  geom_histogram(aes(x = variate, fill = label), bins = 30) +
+  facet_grid(label ~ ., scales = "free_y") +
+  theme_bw()
+```
+
+Note, the y-axis scales.
+The large overlap shows that it will generally be hard to distinguish
+both instances.
+Also note, that this is just the training data.
+To actually estimate the error I will do a repeated cross validation.
+
+
+
+
+
+
+
+
+***
+
+
+
+
+
+
+
+
+# Prediction Error Estimation
+
+A repeated cross validation will be used to estimate the prediction error
+of the models.
+For this, a few functions are defined first.
+Below is a function that extracts the labels, posterior probabilities,
+and ranking from predictions of a test set.
+
+```{r}
+ExtractResults <- function(model, Xtest, Ytest) {
+  dt <- data.table(
+    PostProb = predict(model, Xtest, type = "posterior")[, 2],
+    Label = Ytest
+  )
+  dt <- na.omit(dt)
+  dt$Rank <- rank(dt$PostProb)
+  dt
 }
 ```
 
-Initially, only the most influencial parameters will be tested in a
-random search.
-These are the parameters which mainly define how complex each tree can grow:
-minimum RMSE icnrease per partition, maximum number of partitions,
-minimum size per partition.
-Other hyper parameters are set to reasonable default values.
+The function below is used to compute confusion matrices for a spectrum
+of cutoff points (thresholds for labelling).
 
 ```{r}
-set.seed(42)
-pars.grid1 <- expand.grid(
-  eta = 0.01, # learning rate
-  gamma = runif(5, max = .1), # minimum RMSE increase for partiion
-  max_depth = sample(1:12, 5), # maximum partiions
-  min_child_weight = sample(1:(nrow(dtrain) / 10), 5), # minimum partition
-  alpha = 0, # L1 regularization
-  subsample = .5, # row subsampling
-  colsample_bytree = .5 # column subsampling
-)
+confuse <- function(ranks, labels, PostProbs, n = 1000) {
+  # prepare table
+  stopifnot(length(ranks) == length(labels))
+  dt <- data.table(rank = ranks, label = labels, probs = PostProbs)
+  steps <- seq.int(2, nrow(dt), length.out = n)
+  dt <- dt[order(rank)]
+
+  # fill matrix with TPs, ...
+  m <- matrix(NA, n, 4, dimnames = list(dt$probs[steps], c("TP", "FP", "TN", "FN")))
+  for (s in seq_along(steps)) {
+    res <- dt[, .(TP = sum(rank >= steps[s] & label),
+                    FP = sum(rank >= steps[s] & !label),
+                    TN = sum(rank < steps[s] & !label),
+                    FN = sum(rank < steps[s] & label))]
+    m[s, ] <- as.numeric(res[1, ])
+  }
+  m
+}
 ```
 
-```{r grid1.1}
-res <- train.grid(dtrain, pars.grid1)
-```
-
-Below is the parameter combination with the best cross validated mean RMSE
-and a 3d plot of the joint distribution of hyper parameters and mean RMSE.
+The function below calculates predictive values from
+confusion matrices.
 
 ```{r}
-rmse1 <- setDT(cbind(res, pars.grid1))
-(best1 <- rmse1[which.min(mean), ])
-scatterplot3d(rmse1$min_child_weight, rmse1$gamma, rmse1$mean, 
-              color = rmse1$max_depth, angle = 60, pch = 20, type = "h")
-md <- sort(unique(rmse1$max_depth))
-legend("topleft", title = "max_depth", bty = "n", legend = md, fill = md)
+GetPredVals <- function(CM, cross) {
+  dt <- data.table(
+    Step = seq_len(nrow(CM)),
+    PostProb = rownames(CM),
+    Recall = CM[, 1] / (CM[, 1] + CM[, 4]),
+    Fallout = CM[, 2] / (CM[, 2] + CM[, 3]),
+    Precision = CM[, 1] / (CM[, 1] + CM[, 2]),
+    FOR = CM[, 4] / (CM[, 4] + CM[, 3]),
+    Accuracy = (CM[, 1] + CM[, 3]) / rowSums(CM),
+    Cross = cross
+  )
+  dt
+}
 ```
 
-Now regularization hyper parameters are tested: 
-Lasso regularization for weights, row subsampling and 
-column (feature) subsampling for each tree.
+Finally, everything is used in a nested loop which will do the repeated
+cross validation for a model.
 
 ```{r}
-set.seed(42)
-pars.grid2 <- expand.grid(
-  eta = 0.01, # learning rate
-  gamma = best1$gamma, # minimum RMSE increase for partiion
-  max_depth = best1$max_depth, # maximum partiions
-  min_child_weight = best1$min_child_weight, # minimum partition
-  alpha = runif(5, max = .5), # L1 regularization
-  subsample = runif(5, min = .1, max = .5), # row subsampling
-  colsample_bytree = runif(5, min = .1, max = .5) # column subsampling
-)
+CrossVal <- function(data, labels, nfold = 5, ncross = 10) {
+  crossResults <- vector("list", ncross)
+  for (cross in seq_len(ncross)) {
+    print(paste("Cross", cross, "..."))
+    folds <- sample(seq_len(nfold), nrow(data), replace = TRUE)
+
+    # folds
+    foldPreds <- vector("list", nfold)
+    for (fold in seq_len(nfold)) {
+      Xtrain <- data[folds != fold, ]
+      Ytrain <- labels[folds != fold]
+      Xtest <- data[fold == fold, ]
+      Ytest <- labels[fold == fold]
+      Xtrain <- cbind(Ytrain, Xtrain)
+      colnames(Xtrain)[1] <- "label"
+      sink("/dev/null") # make it shut up
+      model <- fda(label ~ ., data = Xtrain, keep.fitted = TRUE, keepxy = FALSE,
+                   method = earth, degree = 2, nk = 100, thresh = 0.003,
+                   pmethod = "exhaustive", nfold = 5, ncross = 30)
+      sink()
+      foldPreds[[fold]] <- ExtractResults(model, Xtest, Ytest)
+    }
+    foldPreds <- rbindlist(foldPreds)
+    CMs <- confuse(foldPreds$Rank, foldPreds$Label, foldPreds$PostProb)
+    PredVals <- GetPredVals(CMs, cross)
+    crossResults[[cross]] <- PredVals
+  }
+
+  rbindlist(crossResults)
+}
 ```
 
-```{r grid1.2}
-res <- train.grid(dtrain, pars.grid2)
-```
+With that, both models are cross validated:
+one using edgeR's FDR control as labels, one using 10\% FDR control as labels.
 
 ```{r}
-rmse2 <- setDT(cbind(res, pars.grid2))
-(best2 <- rmse2[which.min(mean), ])
+resYedgeR <- CrossVal(X[, c(-6, -7)], X[, YedgeR])
+resY01 <- CrossVal(X[, c(-6, -7)], X[, Y01])
 ```
 
-The final best combination of hyper parameters is...
+ROC curves are shown below.
 
 ```{r}
-rmse <- rbind(rmse1, rmse2)
-(best <- rmse[which.min(mean), ])
+resY01[, PostProb := as.numeric(PostProb)]
+resYedgeR[, PostProb := as.numeric(PostProb)]
+res <- rbind(resYedgeR, resY01)
+res$Target <- c(rep("YedgeR", nrow(resYedgeR)), rep("Y01", nrow(resY01)))
+res$group <- paste0(res$Target, res$Cross)
+ggplot(res, aes(group = group, color = Target)) +
+  geom_abline(slope = 1, color = "gray", linetype = 2) +
+  geom_path(aes(x = Fallout, y = Recall)) +
+  theme_bw()
 ```
 
-Eventually, one can increase the performance by making the model bigger,
-i.e. reducing the learning rate and increasing the number of iterations.
-I have tried that by decreasing $\eta$ to 0.001 or 0.05 while increasing the
-maximum number of iterations to 100k and relaxing the early stopping to
-10k.
-However, validation RMSE improvements only start near 100k trees per model.
-I decided to go with the much lighter model with nearly the same performance.
+Classifying whether scDD's loss of FDR control is below 10\% seems easier.
+As this is a reasonable model I will chose this one.
+I guess I will want to make some plots later on, so I will save the
+cross validation results here.
+
+```{r}
+saveRDS(res, "scDD_class_CV.rds")
+```
+
+
+
+
+
+
+
+
+
+
+
+***
+
+
+
+
+
+
+
+
+
+# Final Model
+
+Finally, the model is fitted on the whole dataset.
 
 ```{r, results='hide'}
-parsl <- list(
-  eta = 0.01, # learning rate
-  gamma = best$gamma, # minimum RMSE increase for partiion
-  max_depth = best$max_depth, # maximum partiions
-  min_child_weight = best$min_child_weight, # minimum partition
-  alpha = best$alpha, # L1 regularization
-  subsample = best$subsample, # row subsampling
-  colsample_bytree = best$colsample_bytree # column subsampling
-)
+model <- fda(Y01 ~ ., data = X[, !"YedgeR"], keep.fitted = FALSE, keepxy = FALSE,
+                   method = earth, degree = 2, nk = 100, thresh = 0.003,
+                   pmethod = "exhaustive", nfold = 5, ncross = 30)
+saveRDS(model, "scDD_class.rds")
 ```
 
-The final model is fitted below.
+The posterior probability distribution from the cross validation results
+is shown below.
 
 ```{r}
-xgb.mod <- xgb.train(params = parsl, data = dtrain, nrounds = best$iter)
-```
-
-Below you can see a ranking of feature importance.
-It is based on the number of occurences and their individual impacts of
-a feature in partitions of the tree ensemble.
-
-```{r}
-dt <- xgb.importance(colnames(dtrain), xgb.mod)
-xgb.plot.importance(dt)
-```
-
-
-
-
-
-
-
-
-
-
-
-
-
-***
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-# Evaluation
-
-Evaluation of the 3 models is done on the test set, 
-which was not used during training or validation.
-
-```{r}
-mars.pred <- predict(mars.mod, Xtest[, feats[-4], with = FALSE])
-gam.pred <- predict(gam.mod, Xtest)
-dtest <- xgb.DMatrix(data = as.matrix(Xtest[, feats[-4], with = FALSE]))
-xgb.pred <- predict(xgb.mod, dtest)
-```
-
-The residuals of all models are shown below 
-together with cubic regression splines.
-In general most residuals are quite small and values near $D_{FDR} = 0$ and
-$D_{FDR} = 1$ are fitted well.
-However, there are many values -- especially around $0.2 < D_{FDR} < 0.7$ --
-with large residuals.
-From the standard errors it seems that these values are the minority.
-Nevertheless, there is clearly a structure visible not caputred by any model.
-
-```{r, warning=FALSE}
-dt <- data.table(
-  D_FDR = rep(Ytest, 3),
-  residual = c(Ytest - mars.pred[, 1], Ytest - gam.pred, Ytest - xgb.pred),
-  model = rep(c("MARS", "GAM", "XGBoost"), each = length(Ytest))
-)
-ggplot(dt, aes(x = D_FDR, y = residual)) +
-  geom_point(aes(color = model), alpha = .3, size = 1) +
-  geom_smooth(aes(color = model, fill = model)) +
+ggplot(resY01) +
+  geom_histogram(aes(x = PostProb), bins = 30) +
+  labs(x = "Posterior Probability") +
   theme_bw()
 ```
 
-Standard errors are calculated and shown below.
-Basically, it would be more useful to know the standard error in the range of
-$0 \le D_{FDR} \le 0.1$ since the scDD method would not be used if it's
-predicted FDR is more than 10% off.
-We included the standard error only considering this range.
+Specificity (1 - fallout) is plotted as a function of the posterior
+probability.
+A specificity of 90\% would be a desired cutoff for a classifier, so
+a horizontal line at 0.9 is plotted as well.
+The posterior probability which would label the data according to
+reach 90\% specificity is shown as red line.
+Note that the posterior probability is logged.
 
 ```{r}
-err <- rbind(
-  dt[, .(se = sd(residual) / sqrt(length(residual))), by = model],
-  dt[D_FDR < 0.1, .(se = sd(residual) / sqrt(length(residual))), by = model]
-)
-err$D_FDR <- rep(c("full", "below 10%"), each = 3)
-ggplot(err, aes(x = model, y = se)) +
-  geom_pointrange(aes(ymin = 0, ymax = se), color = "blue") +
-  coord_flip() +
-  facet_grid(D_FDR ~ .) +
+(thresh <- resY01[Fallout < 0.11 & Fallout > 0.099, median(PostProb)])
+ggplot(resY01, aes(x = PostProb, y = 1 - Fallout)) +
+  geom_point(alpha = .3, size = .7) +
+  geom_hline(yintercept = 0.9, color = "gray", linetype = 2) +
+  geom_vline(xintercept = thresh, color = "red", linetype = 2) +
+  scale_x_continuous(trans = "log10") +
+  labs(x = "Posterior Probability", y = "Specificity") +
   theme_bw()
-(err)
 ```
 
-The MARS model is the worst, the tree ensemble is slightly better than 
-the generalized additive model.
-For predicting the loss of FDR control both XGBoost and GAM are near 0.003
-standard error.
-Confidence intervals for below 10% FDR control loss are shown below.
+Below is the accuracy (balanced)
+plotted as a function of the posterior probability.
+The posterior probability which would label the data according to
+reach 90\% specificity is shown as red line.
+Again the x axis is logged.
 
 ```{r}
-err[D_FDR == "below 10%", .(CI.99 = 2.58 * se, CI.95 = 1.96 * se), by = model]
+resY01[, max(Recall - Fallout)]
+ggplot(resY01, aes(x = PostProb, y = Recall - Fallout)) +
+  geom_point(alpha = .3, size = .7) +
+  geom_vline(xintercept = thresh, color = "red", linetype = 2) +
+  scale_x_continuous(trans = "log10") +
+  labs(x = "Posterior Probability", y = "Accuracy") +
+  theme_bw()
 ```
 
-XGBoost is the best but it is also the substantially most complex model.
-The GAM is much smaller and easier to interpret.
-I will continue with both.
-
-
-
-
-
-
-
-
-
-
-
-
-***
-
-
-
-
-
-
-
-
-
-
-
-
-
-# Save
-
-Now the final models are trained on the whole dataset and saved.
-
-**GAM**
+It is in the region of a maximum balanced accuracy of around 79\%.
+The ROC curve with 90\% specificity is shown below.
 
 ```{r}
-gam.mod <- gam(
-  D_FDR ~ 
-    ti(n_hat, cv_hat_between) +
-    ti(cv_hat_between, batch_corrs) +
-    te(n_hat, cv_hat_within, batch_corrs),
-  data = FDR,
-  method = "ML"
-)
-saveRDS(gam.mod, "scDD_gam.mod.rds")
+ggplot(resY01, aes(group = Cross)) +
+  geom_abline(slope = 1, color = "gray", linetype = 2) +
+  geom_hline(yintercept = 0.9, color = "red", linetype = 3) +
+  geom_path(aes(x = Fallout, y = Recall), alpha = .5) +
+  theme_bw()
 ```
 
-**XGBoost**
 
-```{r}
-dtrain <- xgb.DMatrix(
-  data = as.matrix(FDR[, feats[-4], with = FALSE]), 
-  label = FDR$D_FDR
-)
-xgb.mod <- xgb.train(params = parsl, data = dtrain, nrounds = best$iter)
-saveRDS(xgb.mod, "scDD_xgb.mod.rds")
-```
+
+
+
 
 
 
@@ -666,5 +583,3 @@ saveRDS(xgb.mod, "scDD_xgb.mod.rds")
 ```{r}
 sessionInfo()
 ```
-
-
