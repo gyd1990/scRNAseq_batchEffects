@@ -1,0 +1,434 @@
+---
+title: "Patel 2014"
+subtitle: "Comparison of Stemness Genesets"
+author: "Marc Schwering"
+output:
+  html_document:
+    number_sections: true
+    toc: true
+    toc_depth: 2
+    fig_width: 10
+    fig_height: 7
+    theme: cosmo
+---
+
+
+
+
+
+# Preparation
+
+## Load
+
+Libraries are loaded.
+
+```{r, message=FALSE, results='hide'}
+library(scater)
+library(data.table)
+library(ggplot2)
+library(SummarizedExperiment)
+library(edgeR)
+library(scDD)
+library(DT)
+library(ggthemes)
+```
+
+Load data and set variables.
+
+```{r}
+grpID <- "Group"
+btchID <- "Replicate"
+smplID <- "Cell"
+sce <- readRDS("intermediate_data/sce.rds")
+sce <- sce[fData(sce)$label == "endo", ]
+```
+
+Load genesets.
+
+```{r}
+setPatel <- as.character(read.csv("data/StemnessSignature.csv")$Gene)
+setSchwering <- as.character(read.csv("results/Stemness_geneset.csv")$Gene)
+str(setPatel)
+str(setSchwering)
+genelist <- readRDS("intermediate_data/Stemness_genelist.rds")
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+***
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+# Genewise Comparison
+
+Here, I will take a look at which genes were identified by each
+filter and why.
+The below function is for plotting Venn diagrams.
+
+```{r}
+VennDiag <- function(l, labs = names(l), cols = c("#4285f4", "#db4437", "#0f9d58", "#f4b400")) {
+  cols <- rep(cols, length.out = length(l))
+  names(l) <- labs
+  grid::grid.newpage()
+  futile.logger::flog.threshold(futile.logger::ERROR, name = "VennDiagramLogger")
+  grid::grid.draw(VennDiagram::venn.diagram(
+    l, filename = NULL, na = "remove", cex = 1.5, lty = 1, lwd = 1, cat.cex = 1,
+    fill = cols, 
+    main.cex = 1.5, main.fontfamily = 2, cat.fontfamily = 2
+  ))  
+}
+```
+
+## Overview
+
+The below Venn diagram should give an overview of both gene sets.
+
+```{r}
+VennDiag(list(Patel = setPatel, Schwering = setSchwering))
+(setBoth <- intersect(setPatel, setSchwering))
+```
+
+Even though I set quite strict FDR threshold, my set is much larger
+then that from Patel et al.
+Overlap is very small.
+
+## Intersect
+
+Below are plots and a table of the genes which appear in both sets.
+
+```{r}
+idxBoth <- which(fData(sce)$hgncSymb %in% setBoth)
+df <- data.frame(
+  exprs = as.vector(t(exprs(sce[idxBoth, ]))),
+  gene = rep(fData(sce)$hgncSymb[idxBoth], each = ncol(sce)),
+  Group = rep(sce[[grpID]], length(idxBoth))
+)
+ggplot(df, aes(color = Group, fill = Group, x = Group, y = exprs)) +
+  geom_jitter(width = .1, size = .5) +
+  geom_violin(alpha = .3) +
+  facet_wrap(~ gene) +
+  labs(y = "log10 Expression") +
+  theme_hc()
+DT::datatable(genelist[HGNC %in% setBoth], rownames = FALSE, 
+              options = list(pageLength = 10)) %>%
+  formatRound(c(3, 4, 7))
+```
+
+I am surprised that FDFT1 is in the Patel set.
+Patel filtered the genes to have at least 1.5 groupwise fold change.
+It is only present in my set because scDD identified the distributions
+as having a different number of modes in both comparisons.
+
+
+
+## Difference Patel
+
+Below is the set of genes which were identified by Patel but not by me.
+In Patel et al they were identified by a minimum per group fold change and
+a higher minimum mean fold change.
+
+```{r}
+setX <- setdiff(setPatel, setSchwering)
+DT::datatable(genelist[HGNC %in% setX], rownames = FALSE, 
+              options = list(pageLength = 20)) %>%
+  formatRound(c(3, 4, 7))
+```
+
+Some genes show contradicting fold changes, and some have a quite low
+mean fold change.
+Since in Patel more groups (also the confounded groups without replicates)
+were considered it can be that the mean fold change was higher for these
+genes.
+The main reason why most of these genes were not identified in my
+filter is the FDR.
+I set a quite strict FDR.
+Some of these genes appear borderline significant, but not below 0.1\% FDR.
+The few that are below 0.1\% FDR do not have a high absolute mean fold change.
+
+```{r}
+idxX <- which(fData(sce)$hgncSymb %in% setX)
+idxs <- sample(idxX, 12)
+df <- data.frame(
+  exprs = as.vector(t(exprs(sce[idxs, ]))),
+  gene = rep(fData(sce)$hgncSymb[idxs], each = ncol(sce)),
+  Group = rep(sce[[grpID]], length(idxs))
+)
+ggplot(df, aes(color = Group, fill = Group, x = Group, y = exprs)) +
+  geom_jitter(width = .1, size = .5) +
+  geom_violin(alpha = .3) +
+  facet_wrap(~ gene) +
+  labs(y = "log10 Expression") +
+  theme_hc()
+```
+
+
+## Difference Schwering
+
+Below is a table of the genes which were identified by my filter but not by
+Patel et al's.
+
+```{r}
+setX <- setdiff(setSchwering, setPatel)
+DT::datatable(genelist[HGNC %in% setX & Filter, ], rownames = FALSE, 
+              options = list(pageLength = 20)) %>%
+  formatRound(c(3, 4, 7))
+```
+
+There are many genes with high group wise fold changes and 
+high mean fold changes.
+These should have also been identified by the filter from Patel.
+I can only assume that the reason why they were not identified is, that
+the other group included by Patel (the confounded groups without replicates)
+lowered the mean fold change too much.
+
+```{r}
+idxX <- which(fData(sce)$hgncSymb %in% setX)
+idxs <- sample(idxX, 12)
+df <- data.frame(
+  exprs = as.vector(t(exprs(sce[idxs, ]))),
+  gene = rep(fData(sce)$hgncSymb[idxs], each = ncol(sce)),
+  Group = rep(sce[[grpID]], length(idxs))
+)
+ggplot(df, aes(color = Group, fill = Group, x = Group, y = exprs)) +
+  geom_jitter(width = .1, size = .5) +
+  geom_violin(alpha = .3) +
+  facet_wrap(~ gene) +
+  labs(y = "log Expression") +
+  theme_hc()
+```
+
+
+
+
+
+
+
+
+
+
+
+
+***
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+# Terms
+
+## Gene Set Enrichment Analysis
+
+Some tools for GSEA.
+
+```{r}
+source("R/doGSEA.R")
+load("data/ENSG2category.rda")
+```
+
+GO terms for cell cycle, biological process and molecular function
+will be tested for enrichment using Fisher's exact test based on the
+set of genes identified by each filter.
+Furthermore, some html files are written, in order to browse terms.
+
+**Patel**
+
+```{r, warning=FALSE}
+idx <- which(genelist$HGNC %in% setPatel)
+gseaPatel <- doGSEA(genelist$ensID[idx], genelist$ensID, ENSG2category)
+plotGSEA(gseaPatel, nrOfSets = 25, main = "Enriched GO Terms in Patel Set")
+DT::datatable(tableGSEA(gseaPatel), rownames = FALSE, options = list(pageLength = 20))
+```
+
+**Schwering**
+
+```{r, warning=FALSE}
+idx <- which(genelist$HGNC %in% setSchwering)
+gseaSchwering <- doGSEA(genelist$ensID[idx], genelist$ensID, ENSG2category)
+plotGSEA(gseaSchwering, nrOfSets = 25, main = "Enriched GO Terms in Schwering Set")
+DT::datatable(tableGSEA(gseaSchwering), rownames = FALSE, options = list(pageLength = 20))
+```
+
+
+
+## Comparison
+
+Here, I want to compare the relevance significance of terms in both gene sets.
+
+```{r}
+TermsPatel <- setDT(gseaPatel$T)
+TermsSchwering <- setDT(gseaSchwering$T)
+TermsPatel <- TermsPatel[order(ID)]
+TermsSchwering <- TermsSchwering[order(ID)]
+```
+
+Both GSEAs are summarized in a table.
+
+```{r, results='hide'}
+Terms <- data.table(
+  Term = TermsPatel$ID,
+  Name = TermsPatel$Name,
+  Patel = TermsPatel$padj,
+  Schwering = TermsSchwering$padj,
+  Ann = TermsPatel$Ann,
+  Source = TermsPatel$source
+)
+```
+
+The venn diagram below shows the overlap of enriched GO terms
+using a 10\% FDR threshold.
+
+```{r}
+VennDiag(list(Patel = Terms[Patel < 0.1, Term], 
+              Schwering = Terms[Schwering < 0.1, Term]))
+int <- intersect(Terms[Patel < 0.1, Name], Terms[Schwering < 0.1, Name])
+DT::datatable(Terms[Name %in% int], rownames = FALSE, options = list(pageLength = 20))
+```
+
+Obviously as with the genes there is little overlap.
+Most terms are very general.
+The only specific terms are related to cell migration, localization,
+and motility.
+
+**Agreement**
+
+To see how well terms of the GSEA agree from both gene sets,
+I will compute the relative overlap of terms identified at various
+FDR thresholds.
+
+```{r}
+overlap <- function(Terms, ths = seq(.01, 1, .01)) {
+  ol <- function(x, y) {
+    length(intersect(na.omit(x), na.omit(y))) / 
+      length(union(na.omit(x), na.omit(y)))
+  }
+  l <- lapply(ths, function(th) {
+    X <- Terms[Patel <= th, Term]
+    Y <- Terms[Schwering <= th, Term]
+    data.table(Overlap = ol(X, Y), FDR = th)
+  })
+  rbindlist(l)
+}
+```
+
+Below is the area chart to show the relative overlap at various FDR's.
+As comparison, the relative overlap in case of random terms is shown as well.
+
+```{r}
+ol <- overlap(Terms)
+ol$Rep <- 0
+ol$Sets <- "PatelSchwering"
+l <- lapply(1:100, function(i) {
+  T1 <- Terms
+  T1$Patel <- runif(nrow(T1))
+  T1$Schwering <- runif(nrow(T1))
+  T1 <- overlap(T1)
+  T1$Rep <- i
+  T1
+})
+olr <- rbindlist(l)
+olr$Sets <- "Random"
+dt <- rbind(olr, ol)
+ggplot(dt, aes(x = FDR, y = Overlap)) +
+  geom_path(aes(group = Rep, color = Sets)) +
+  coord_cartesian(xlim = c(0, 1), ylim = c(0, 0.5)) +
+  scale_color_hc() +
+  theme_hc()
+```
+
+For FDR's up to around 5\% the overlap is similar to a random overlap.
+After that, the overlap is substantially lower than random.
+Below is another visualization to show the disagreement between
+GSEA's from both datasets.
+
+```{r}
+t <- table(Terms$Source)
+n <- names(t[t > 500])
+Terms[!Source %in% n, Source := "Other"]
+Terms$Source <- factor(Terms$Source, levels(as.factor(Terms$Source))[c(1:4, 6, 5)])
+```
+
+```{r}
+ggplot(Terms, aes(size = Ann, color = Source)) +
+  geom_point(aes(x = -log10(Patel), y = -log10(Schwering))) +
+  labs(y = "-log10 FDR Schwering", x = "-log10 FDR Patel") +
+  scale_size_continuous(name = "Annotations") +
+  theme_bw()
+Terms[, .(PCorr = cor(Patel, Schwering)), by = Source]
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+***
+
+
+
+# Session
+
+
+```{r}
+sessionInfo()
+```
+
+
+

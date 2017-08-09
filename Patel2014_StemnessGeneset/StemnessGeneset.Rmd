@@ -1,0 +1,486 @@
+---
+title: "Patel 2014"
+subtitle: "Stemness Geneset"
+author: "Marc Schwering"
+output:
+  html_document:
+    number_sections: true
+    toc: true
+    toc_depth: 2
+    fig_width: 10
+    fig_height: 7
+    theme: cosmo
+---
+
+
+
+
+
+# Preparation
+
+## Load
+
+Libraries are loaded.
+
+```{r, message=FALSE, results='hide'}
+library(scater)
+library(data.table)
+library(ggplot2)
+library(SummarizedExperiment)
+library(edgeR)
+library(scDD)
+library(DT)
+library(Lattirl)
+```
+
+Load data and set variables.
+
+```{r}
+grpID <- "Group"
+btchID <- "Replicate"
+smplID <- "Cell"
+sce <- readRDS("intermediate_data/sce.rds")
+sce <- sce[fData(sce)$label == "endo", ]
+```
+
+## Stemness Geneset
+
+Patel et al identified a gene set of 52 genes describing the stemness.
+These are gene expressions which seem reasonable different
+in the sheroid cell lines (CSCs) compared to the patient derived tumours.
+
+```{r}
+setPatel <- as.character(read.csv("data/StemnessSignature.csv")$Gene)
+str(setPatel)
+```
+
+They were filtered by having at least 1.5-fold change in expression 
+in each CSC-tumour pair, 
+and 3-fold change in at least 1 CSC-tumour pair.
+Tumours from MG26, MG28, MG30 were considered.
+
+
+## Patient Tumours vs in vitro Model
+
+Instead of using generic fold-changes as filter, we could instead
+infer which genes have a significantly different expression.
+But we can only do that for tumours with replicates (MGH26, MGH31).
+
+```{r}
+table(sce[[grpID]])
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+***
+
+
+
+
+
+
+
+
+
+
+
+# Differentially Expressed Genes
+
+I will test each tumour individually against the sheroid cell line, 
+and then use the intersection of both gene lists as final results.
+In this scenario the groups (in vitro model, patient) are confounded
+by the batches the data was processed in.
+To be save, I am only allowed to use edgeR by summing up over batches
+(as of Lun 2017).
+However, as scDD is quite robust to batch effects (and more powerful)
+it might be useful.
+I will use a predictive model to estimate whether scDD holds FDR control.
+(i.e. whether the batch effect is too strong for scDD).
+
+
+## MGH26
+
+```{r}
+cmp <- c("MGH26", "CSC")
+cells <- sce[[grpID]] %in% cmp
+m <- exprs(sce[, cells])
+m[m < 0] <- 0
+EstimFDRcontrol(2^m, batches = sce[[btchID]][cells], 
+                groups = sce[[grpID]][cells], FDR = 0.01)
+```
+
+It seems that the batch effect is not so strong, and scDD will hold FDR control.
+Therefore I will use a consensus approach of scDD and edgeR to 
+call differentially distributed genes.
+
+```{r}
+groups <- factor(sce[[grpID]][cells], levels = cmp)
+batches <- sce[[btchID]][cells]
+```
+
+
+
+**scDD**
+
+Differentially distributed genes are identified using scDD.
+
+```{r, results='hide'}
+# which genes are differently expressed in CSCs?
+m <- exprs(sce[, cells])
+m[m < 0] <- 0
+m <- 2^m - 1
+se <- SummarizedExperiment(
+  assays = list("NormCounts" = m),
+  colData = data.frame(condition = groups)
+)
+se <- scDD(se, permutations = 0, testZeroes = FALSE, 
+           prior_param = list(alpha = 0.01, mu0 = 0, s0 = 0.01, a0 = 0.01, b0 = 0.01))
+
+# fetch results
+res <- setDT(results(se))
+res <- res[order(res$gene), ]
+```
+
+I'd like to tidy up the table a bit.
+
+```{r}
+scDDgenes <- data.table(
+  gene = res$gene,
+  PValue = res$nonzero.pvalue,
+  FDR = res$nonzero.pvalue.adj,
+  type = as.character(res$DDcategory)
+)
+hist(scDDgenes$PValue[!is.na(scDDgenes$PValue)])
+table(scDDgenes$FDR < 0.01)
+```
+
+
+
+
+**edgeR**
+
+Now edgeR with summing up over batches.
+
+```{r, results='hide'}
+# sum up batches
+l <- lapply(unique(batches), function(i) {
+  rowSums(counts(sce)[, which(batches == i)])
+})
+m <- do.call("cbind", l)
+groups2 <- c(rep("Patient", 2), rep("CSC", 2))
+
+# which genes are differently expressed in CSCs?
+dge <- DGEList(counts = m, group = groups2)
+dge <- calcNormFactors(dge)
+design <- model.matrix(~ groups2)
+dge <- estimateDisp(dge, design)
+fit <- glmFit(dge, design)
+lrt <- glmLRT(fit, coef = 2)
+
+# fetch results
+res <- topTags(lrt, n = Inf)$table
+res$gene <- rownames(res)
+setDT(res)
+edgeRgenes <- res[order(res$gene), ]
+```
+
+```{r}
+table(edgeRgenes$FDR < 0.01)
+plotBCV(dge)
+hist(edgeRgenes$PValue)
+```
+
+
+
+**Consensus**
+
+Here, the lower FDR will be used for each gene.
+So for a given FDR I will effectively take the union of edgeR and scDD.
+
+```{r}
+genelistMGH26 <- data.table(
+  ensID = edgeRgenes$gene,
+  HGNC = fData(sce)$hgncSymb,
+  logFC = edgeRgenes$logFC,
+  FDR = vapply(seq_len(nrow(scDDgenes)), function(i) 
+    min(edgeRgenes[i, FDR], scDDgenes[i, FDR]), numeric(1)),
+  type = scDDgenes$type
+)
+```
+
+
+## MGH30
+
+```{r}
+cmp <- c("MGH30", "CSC")
+cells <- sce[[grpID]] %in% cmp
+m <- exprs(sce[, cells])
+m[m < 0] <- 0
+EstimFDRcontrol(2^m, batches = sce[[btchID]][cells], 
+                groups = sce[[grpID]][cells], FDR = 0.01)
+```
+
+Again, the batch effect seems to be not too strong for scDD.
+
+```{r}
+groups <- factor(sce[[grpID]][cells], levels = cmp)
+batches <- sce[[btchID]][cells]
+```
+
+
+
+**scDD**
+
+Differentially distributed genes are identified using scDD.
+
+```{r, results='hide'}
+# which genes are differently expressed in CSCs?
+m <- exprs(sce[, cells])
+m[m < 0] <- 0
+m <- 2^m - 1
+se <- SummarizedExperiment(
+  assays = list("NormCounts" = m),
+  colData = data.frame(condition = groups)
+)
+se <- scDD(se, permutations = 0, testZeroes = FALSE, 
+           prior_param = list(alpha = 0.01, mu0 = 0, s0 = 0.01, a0 = 0.01, b0 = 0.01))
+
+# fetch results
+res <- setDT(results(se))
+res <- res[order(res$gene), ]
+```
+
+I'd like to tidy up the table a bit.
+
+```{r}
+scDDgenes <- data.table(
+  gene = res$gene,
+  PValue = res$nonzero.pvalue,
+  FDR = res$nonzero.pvalue.adj,
+  type = as.character(res$DDcategory)
+)
+hist(scDDgenes$PValue[!is.na(scDDgenes$PValue)])
+table(scDDgenes$FDR < 0.01)
+```
+
+
+
+
+**edgeR**
+
+Now edgeR with summing up over batches.
+
+```{r, results='hide'}
+# sum up batches
+l <- lapply(unique(batches), function(i) {
+  rowSums(counts(sce)[, which(batches == i)])
+})
+m <- do.call("cbind", l)
+groups2 <- c(rep("Patient", 2), rep("CSC", 2))
+
+# which genes are differently expressed in CSCs?
+dge <- DGEList(counts = m, group = groups2)
+dge <- calcNormFactors(dge)
+design <- model.matrix(~ groups2)
+dge <- estimateDisp(dge, design)
+fit <- glmFit(dge, design)
+lrt <- glmLRT(fit, coef = 2)
+
+# fetch results
+res <- topTags(lrt, n = Inf)$table
+res$gene <- rownames(res)
+setDT(res)
+edgeRgenes <- res[order(res$gene), ]
+```
+
+```{r}
+table(edgeRgenes$FDR < 0.01)
+plotBCV(dge)
+hist(edgeRgenes$PValue)
+```
+
+
+
+**Consensus**
+
+Here, the lower FDR will be used for each gene.
+So for a given FDR I will effectively take the union of edgeR and scDD.
+
+```{r}
+genelistMGH30 <- data.table(
+  ensID = edgeRgenes$gene,
+  HGNC = fData(sce)$hgncSymb,
+  logFC = edgeRgenes$logFC,
+  FDR = vapply(seq_len(nrow(scDDgenes)), function(i) 
+    min(edgeRgenes[i, FDR], scDDgenes[i, FDR]), numeric(1)),
+  type = scDDgenes$type
+)
+```
+
+
+
+## Combine Results
+
+Let's combine both results.
+
+```{r}
+identical(genelistMGH26$ensID, genelistMGH30$ensID)
+```
+
+Eventually I want to take the intersection of genes called by both methods,
+so the higher FDR will be used for each gene.
+
+```{r}
+genelist <- data.table(
+  ensID = genelistMGH26$ensID,
+  HGNC = genelistMGH26$HGNC,
+  logFC_MGH26 = genelistMGH26$logFC,
+  logFC_MGH30 = genelistMGH30$logFC,
+  FDR = vapply(seq_len(nrow(genelistMGH26)), function(i) 
+    max(genelistMGH26[i, FDR], genelistMGH30[i, FDR]), numeric(1))
+)
+```
+
+scDD also defines what type of differential expression is present.
+For each gene this type should be noted if scDD predicts the same type of
+differential expression for both tumours.
+
+```{r}
+genelist$Type <- ifelse(genelistMGH26$type == genelistMGH30$type, 
+                        genelistMGH26$type, "unclear")
+genelist <- genelist[complete.cases(genelist), ]
+genelist[, sum(FDR < 0.001), by = Type]
+```
+
+
+
+
+
+
+
+
+
+
+
+***
+
+
+
+
+
+
+
+
+
+
+
+
+
+# Create Stemness Geneset
+
+```{r}
+genelist <- genelist[!Type %in% c("NS", "NC")]
+genelist <- genelist[HGNC != "NaS"]
+```
+
+Now, genes are filtered to a reasonable set.
+Patel et al did that by filtering for fold changes.
+I will do the same, but only for genes which seem highly significant 
+with FDRs below 0.1\%.
+The fold change threshold will be 2 for each tumour and
+3 for the mean log fold change.
+
+```{r}
+genelist$meanLogFC <- rowMeans(cbind(genelist$logFC_MGH26, genelist$logFC_MGH30))
+filter <- genelist$FDR < 0.001 & abs(genelist$meanLogFC) > log(3) &
+  abs(genelist$logFC_MGH26) > log(2) & abs(genelist$logFC_MGH30) > log(2)
+table(filter)
+```
+
+However, with this method I cannot detect differential gene expression which
+has the same mean but e.g. a different shape.
+Therefore I will use the type predictions from scDD.
+If scDD predicted, that the type was of kind differential proportion (DP),
+differential modes (DM), or differential both (DB) (from scDD paper)
+then it will be included, as long as the FDR is below 0.1\% and
+all fold changes have equal sign.
+
+```{r}
+filter[genelist$Type %in% c("DP", "DM", "DB") & genelist$FDR < 0.001 &
+         genelist$logFC_MGH26 * genelist$logFC_MGH30 > 0] <- TRUE
+genelist$Filter <- filter
+table(genelist$Filter)
+```
+
+As a sanity check I will plot a sample of these special cases.
+
+```{r}
+n <- 12
+DMs <- sample(which(genelist$Type %in% c("DM", "DP", "DB")), n)
+df <- data.frame(
+  exprs = as.vector(t(exprs(sce[DMs, ]))),
+  gene = rep(fData(sce)$hgncSymb[DMs], each = ncol(sce)),
+  Group = rep(sce[[grpID]], n)
+)
+ggplot(df, aes(color = Group, fill = Group, x = Group, y = exprs)) +
+  geom_jitter(width = .1, size = .5) +
+  geom_violin(alpha = .3) +
+  facet_wrap(~ gene) +
+  labs(y = "log10 Expression") +
+  theme_bw()
+```
+
+A volcano plot for the whole gene set using the mean logFC of both comparisons 
+and the higher FDR is shown below.
+
+```{r}
+ggplot(genelist, aes(x = meanLogFC, y = -log10(FDR))) +
+  geom_point(aes(color = Filter), size = 1) +
+  scale_color_manual(values = c("gray", "black")) +
+  theme_bw() +
+  theme(legend.position = "none")
+```
+
+These genes will be our set of stemness genes.
+
+```{r}
+setSchwering <- genelist[which(Filter), HGNC]
+saveRDS(genelist, "intermediate_data/Stemness_genelist.rds")
+write.csv(data.frame(Gene = setSchwering), "results/Stemness_geneset.csv")
+```
+
+
+
+
+
+
+
+
+
+
+
+***
+
+
+
+# Session
+
+
+```{r}
+sessionInfo()
+```
+

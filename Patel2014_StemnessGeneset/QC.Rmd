@@ -1,0 +1,556 @@
+---
+title: "Patel 2014"
+subtitle: "Quality Control"
+author: "Marc Schwering"
+output:
+  html_document:
+    number_sections: true
+    toc: true
+    toc_depth: 2
+    fig_width: 10
+    fig_height: 7
+    theme: cosmo
+---
+
+# Pre-Processing
+
+## Load Data
+
+Libraries are loaded.
+
+```{r, warning=FALSE, message=FALSE, results='hide'}
+library(data.table)
+library(MultiAssayExperiment)
+library(SummarizedExperiment)
+library(scran)
+library(scater)
+library(ggplot2)
+library(biomaRt)
+```
+
+For convenience I download the experiment from 
+[conquer](http://imlspenticton.uzh.ch:3838/conquer/) (GSE57872).
+The dataset contains scRNA-seq data for glioblastoma cell lines based on a
+SMART-seq protocol.
+Some cells were derived directly from patients (MGH label),
+some are from spheroid culture (CSC).
+The count data and some phenotypic information is contained in the
+multi assay experiment object.
+
+```{r}
+gse <- readRDS("data/GSE.rds")
+cnts <- assays(experiments(gse)$gene)$count
+quantity <- "reads"
+
+gse_gene <- experiments(gse)[["gene"]]
+celllines <- pData(gse)$characteristics_ch1
+table(celllines)
+celltypes <- pData(gse)$characteristics_ch1.1
+table(celltypes)
+subtypes <- pData(gse)$characteristics_ch1.2
+table(subtypes)
+
+rm(gse, gse_gene)
+gc()
+```
+
+More interestingly for batches though is the experimental procedure.
+Looking up the actual data on
+[ncbi](https://www.ncbi.nlm.nih.gov/geo/browse/?view=samples&series=57872&zsort=date&display=500&page=1)
+one can identify batches by the naming sceme of the samples.
+Looking into the fastq file machine Ids one can confirm whether cells 
+were processed on different machines, and so
+likely processed in a different batch.
+
+```{r}
+MGH26_1 <- paste0("GSM", 1395399:1395494)
+MGH26_2 <- paste0("GSM", 1395495:1395590)
+MGH28 <- paste0("GSM", 1395591:1395686)
+MGH29 <- paste0("GSM", 1395687:1395782)
+MGH30 <- paste0("GSM", 1395783:1395878)
+MGH31 <- paste0("GSM", 1395879:1395974)
+MGH30L <- paste0("GSM", 1395975:1396070)
+CSC6 <- paste0("GSM", 1396071:1396166)
+CSC8 <- paste0("GSM", 1396167:1396262)
+identical(colnames(cnts),
+          c(MGH26_1, MGH26_2, MGH28, MGH29, MGH30, MGH31, MGH30L, CSC6, CSC8))
+```
+
+These are the actual batches.
+
+```{r}
+batches <- character(ncol(cnts))
+batches[colnames(cnts) %in% MGH26_1] <- "MGH26_1"
+batches[colnames(cnts) %in% MGH26_2] <- "MGH26_2"
+batches[colnames(cnts) %in% MGH28] <- "MGH28"
+batches[colnames(cnts) %in% MGH29] <- "MGH29"
+batches[colnames(cnts) %in% MGH30] <- "MGH30"
+batches[colnames(cnts) %in% MGH31] <- "MGH31"
+batches[colnames(cnts) %in% MGH30L] <- "MGH30L"
+batches[colnames(cnts) %in% CSC6] <- "CSC6"
+batches[colnames(cnts) %in% CSC8] <- "CSC8"
+```
+
+
+
+## Data Consistency
+
+These are some basic consistency and sanity checks for the data.
+
+```{r}
+dim(cnts)
+cnts[1:5, 1:5]
+any(is.null(cnts) | is.na(cnts))
+any(cnts < 0)
+sum(cnts < 1) / length(cnts)
+summary(as.vector(as.matrix(cnts)))
+plot(table(substr(as.vector(as.matrix(cnts)), 1, 1))[-1])
+```
+
+
+
+## Create SCE Dataset
+
+**Phenotypic Data**
+
+From the phenotypic information a table is created.
+
+```{r}
+annotation <- data.table(
+  Cellline = celllines,
+  Celltype = celltypes,
+  Subtype = subtypes,
+  Batch = batches,
+  Cell = colnames(cnts)
+)
+grpID <- "Cellline"
+btchID <- "Batch"
+smplID <- "Cell"
+```
+
+Now we can see the experimental design.
+
+```{r}
+annotation[, unique(Cellline), by = Batch]
+```
+
+All patient information (cellline) is completely confounded by batches.
+For most patients there are no replicates, so there is no way to tell
+whether differences are actually caused by the different biological background.
+Only patients MGH26 and MGH30 have replicates.
+So, here it is possible to estimate the batch effect.
+
+```{r}
+pheno_data <- new("AnnotatedDataFrame", annotation)
+rownames(pheno_data) <- pheno_data[[smplID]]
+table(annotation[[grpID]])
+table(annotation[[btchID]])
+```
+
+**Feature Data**
+
+Feature data (about genes) is created from the gene Ids.
+Version numbers are ommited.
+
+```{r}
+genes <- data.frame(
+  geneId = vapply(strsplit(rownames(cnts), ".", fixed = TRUE), 
+                  function(x) x[1], character(1)),
+  isERCC = grepl("ERCC", toupper(rownames(cnts))),
+  noRead = grepl("__", rownames(cnts))
+)
+```
+
+For ensembl gene Ids HGNC symbols and chromosome names 
+are retrieved using biomart.
+
+```{r}
+ensembl <- useEnsembl(biomart = "ensembl", dataset = "hsapiens_gene_ensembl")
+bm <- getBM(
+  attributes = c('ensembl_gene_id', 'hgnc_symbol', 'chromosome_name'), 
+  filters = 'ensembl_gene_id', 
+  values = genes$geneId, 
+  mart = ensembl
+)
+```
+
+HGNC symbols, chromosome name, and labels are constructed.
+
+```{r}
+genes$hgncSymb <- ""
+genes$label <- "endo"
+genes$chr <- ""
+genes$isMT <- FALSE
+genes$hgncSymb <- bm$hgnc_symbol[match(genes$geneId, bm$ensembl_gene_id)]
+genes$hgncSymb[genes$isERCC] <- genes$geneId[genes$isERCC]
+genes$hgncSymb[is.na(genes$hgncSymb) | genes$hgncSymb == ""] <- "NaS"
+genes$chr <- bm$chromosome_name[match(genes$geneId, bm$ensembl_gene_id)]
+genes$chr[is.na(genes$chr) | genes$chr == ""] <- "NaChr"
+```
+
+Mitochondrial genes are identified by the chromosome name. 
+They are labelled together with spike-ins. 
+Finally, the feature data object is created.
+
+```{r}
+genes$isMT <- genes$chr == "MT"
+genes$label[genes$isERCC] <- "spike-in"
+genes$label[genes$isMT] <- "MT"
+sum(genes$isERCC)
+sum(genes$isMT)
+```
+
+The annotated data frame is constructed.
+
+```{r}
+feature_data <- new("AnnotatedDataFrame", genes)
+rownames(feature_data) <- feature_data$geneId
+```
+
+**SCE Set**
+
+Everything is combined into a single cell expression dataset 
+which is used throuout the analysis.
+
+```{r}
+rownames(cnts) <- genes$geneId
+sce <- newSCESet(
+  countData = cnts,
+  phenoData = pheno_data,
+  featureData = feature_data
+)
+dim(sce)
+rm(cnts)
+gc()
+```
+
+
+## Remove Rows
+
+Genes without any count in any cell do not contain information 
+and can savely be removed.
+
+```{r}
+nonzero_genes <- rowSums(counts(sce) > 0) > 0
+table(nonzero_genes)
+dt <- data.table(
+  label = fData(sce)$label, 
+  dropout = !nonzero_genes
+)
+dt[, .(total = sum(dropout), proportion = sum(dropout) / length(dropout)), 
+   by = label]
+sce <- sce[nonzero_genes, ]
+```
+
+There are some specials rows with stuff like unmapped reads.
+They will also be removed.
+
+```{r}
+table(featureData(sce)$noRead)
+sce <- sce[!featureData(sce)$noRead, ]
+```
+
+
+## Calculate Quality Control Metrics
+
+Quality control metrics are calculated.
+
+```{r}
+spikeIDs <- featureNames(sce)[fData(sce)$isERCC]
+mtIDs <- featureNames(sce)[fData(sce)$isMT]
+sce <- calculateQCMetrics(sce, feature_controls = 
+                            list(SpikeIn = spikeIDs, MT = mtIDs))
+```
+
+
+
+
+
+
+
+# Cell Filtering
+
+## Manual Cell Filter
+
+### Total Number of Reads per Cell
+
+Cells containing much more or much less reads than all the other cells are 
+likely to be technical artifacts.
+3 median absolute deviations on a log10 scale around the median 
+are used as thresholds.
+
+```{r}
+MADrange <- function(arr, nmads = 5, log = FALSE) {
+  if(log) arr <- log10(arr)
+  cur.med <- median(arr)
+  cur.mad <- mad(arr, center = cur.med)
+  upper.limit <- cur.med + nmads * cur.mad
+  lower.limit <- cur.med - nmads * cur.mad
+  out <- c(lower.limit, upper.limit)
+  if(log) out <- 10^out
+  return(out)
+}
+(th <- MADrange(sce$total_counts, 3, log = TRUE))
+```
+
+The plot shows the distribution with thresholds in red.
+
+```{r}
+main <- sprintf("Filter by Total Counts with thresholds at %.0f and %.0f", 
+                th[1], th[2])
+ggplot(data.frame(counts = sce$total_counts)) +
+  geom_histogram(aes(x = counts), bins = 30) +
+  geom_vline(xintercept = th, color = "red", linetype = 2) +
+  ggtitle(main) +
+  theme_bw()
+filter_by_total_counts <- colSums(counts(sce)) > th[1] & 
+                          colSums(counts(sce)) < th[2]
+table(filter_by_total_counts)
+```
+
+
+### Total Number of Features Detected per Cell
+
+Cells which have almost no detected genes but a very high count for only a 
+few genes might have passed the first filter.
+This second filter detects cell with only very few genes detected.
+3 median absolute deviations below the median is used as threshold.
+
+```{r}
+(th <- MADrange(sce$total_features, 3)[1])
+main <- sprintf("Filter by Total Features with lower Threshold at %.0f", th)
+ggplot(data.frame(counts = sce$total_features)) +
+  geom_histogram(aes(x = counts), bins = 30) +
+  geom_vline(xintercept = th, color = "red", linetype = 2) +
+  ggtitle(main) +
+  theme_bw()
+filter_by_expr_features <- sce$total_features > th
+table(filter_by_expr_features)
+```
+
+### Summary
+
+Now, all manual cell filters are combined.
+The number of cells which are kept by this manual cell filter are shown below.
+
+```{r}
+pData(sce)$filter_cells_manual <- (
+  filter_by_total_counts &
+  filter_by_expr_features 
+)
+table(pData(sce)$filter_cells_manual)
+```
+
+The proportion of cell kept per batch.
+
+```{r}
+dt <- data.table(
+  group = sce[[grpID]], 
+  batch = sce[[btchID]], 
+  filter = sce$filter_cells_manual
+)
+dt[, .(keep = sum(filter), 
+       proportion = sum(filter) / length(filter)), by = batch]
+```
+
+
+## Scater Default Cell Filter
+
+There is a default cell filter by the scater package.
+It removes cells with 
+* more than 5 MAD (on log10 scale) from median total readcounts
+* more than 5 MAD from median features detected
+
+```{r}
+sce$filter_cells_default <- (
+  !sce$filter_on_total_counts &
+  !sce$filter_on_total_features 
+)
+table(sce$filter_cells_default)
+```
+
+
+
+
+
+## Remove Cells
+
+```{r}
+sce$filter_cells_final <- sce$filter_cells_manual & sce$filter_cells_default
+table(sce$filter_cells_final)
+sce <- sce[, sce$filter_cells_final]
+```
+
+
+
+
+
+# Gene Filtering
+
+## Gene Expression
+
+The following plot shows the top 50 expressed genes.
+
+```{r}
+scater::plotQC(sce, type = "highest-expression")
+```
+
+## Low Abundance Genes
+
+As for zero genes these genes are problematic in downstream analysis 
+and are filtered out.
+There are two different methods to identify low abundance genes.
+
+### Mean Expression
+
+Here, low abundance genes are defined as genes with a mean expression 
+of below 1 for readcounts and below 0.01 for UMIs.
+This method only filters out genes which are neither expressed in 
+many cells nor expressed highly in few cells.
+
+```{r}
+aveCounts <- rowMeans(counts(sce))
+filter_on_ave_count <- 
+  aveCounts >= switch(quantity, reads = 1, molecules = 0.01)
+table(filter_on_ave_count)
+```
+
+### Number of Expressing Cells
+
+Another method to identify low abundance genes is by 
+the number of cells in which they are expressed.
+This method is more stringent and will filter out rare cell types.
+A threshold for identifying expression in a single cell and a 
+threshold for the minimum number of expressing cells can be set.
+For UMIs the threshold for expression is usually defined 
+as more than 1 count, for readcounts it is defined as more than 4 counts.
+Here, the minimum expressing cells is 
+set to 1% of all cells (all batches combined).
+
+```{r}
+nCounts <- switch(quantity, reads = 4, molecules = 1)
+nCells <- ceiling(ncol(counts(sce)) * 0.01)
+exprCells <- apply(counts(sce), 1, function(x) sum(x > nCounts))
+filter_on_expr_cells <- exprCells >= nCells
+table(filter_on_expr_cells)
+```
+
+### Mean Expression vs Number of Expressing Cells
+
+The scatter plot below helps identify correlation beween mean expression and
+number of expressing cells for genes.
+
+```{r}
+df <- data.frame(
+  l2aveCount = log2(aveCounts), 
+  exprClls = exprCells
+)
+arr <- densCols(df$exprClls, df$l2aveCount, 
+                colramp = colorRampPalette(c("black", "white")))
+df$dens <- col2rgb(arr)[1, ] + 1L
+cols <-  colorRampPalette(c("#000099", "#00FEFF", "#45FE4F", "#FCFF00", 
+                            "#FF9400", "#FF3100"))(256)
+df$col <- cols[df$dens]
+plot(exprClls ~ l2aveCount, data = df[order(df$dens), ], pch = 20, col = col, 
+     cex = 0.3, bty = "l", main = "Mean Expression and Number of Expressing Cells")
+legend("bottomright", c("high", "low"), fill = c("#FF3100", "#000099"), 
+       border = "white", bty = "n", title = "Density")
+```
+
+## Summary
+
+Both filters are used.
+
+```{r}
+fData(sce)$filter_genes_final <- filter_on_ave_count & filter_on_expr_cells
+table(fData(sce)$filter_genes_final)
+sce <- sce[fData(sce)$filter_genes_final, ]
+```
+
+
+## Overview
+
+Here is a look at the cleaned count table.
+
+```{r, warning=FALSE}
+scater::plotPCA(sce, colour_by = btchID, shape_by = grpID, ncomponents = 3)
+```
+
+Below univariate linear models are fitted with one explanatory variable each.
+R squared value distributions are shown as densities for each variable.
+This represents how much variance can be explained with this variable.
+
+```{r}
+vars <- c("total_features", "pct_exprs_top_50_features", "pct_dropout", 
+          "pct_exprs_feature_controls_SpikeIn", "pct_exprs_feature_controls_MT")
+plotQC(sce, "expl", variables = c(vars, grpID, btchID))
+```
+
+Most variance can be explained by dropouts.
+After that, batches, then celllines explain most variance.
+So, here the batch explains more variance than the actual biological
+background (cellline).
+
+Most groups (celllines) were only processed in one batch.
+Since variance introduced by the batch is much larger than the variance 
+introduced by the group, we cannot draw any conclusions when comparing
+2 such groups.
+As mentioned above, some groups were processed in several batches.
+So, lets focus on the groups that have replicates (MGH26, MGH30, CSC).
+
+```{r}
+pData(sce)$Group <- "other"
+pData(sce)$Group[pData(sce)[[grpID]] == "patient id: MGH26"] <- "MGH26"
+pData(sce)$Group[pData(sce)[[grpID]] == "patient id: MGH30"] <- "MGH30"
+pData(sce)$Group[pData(sce)[[grpID]] == "cell line: CSC6"] <- "CSC"
+pData(sce)$Group[pData(sce)[[grpID]] == "cell line: CSC8"] <- "CSC"
+grpID <- "Group"
+pData(sce)$Replicate <- "other"
+pData(sce)$Replicate[pData(sce)[[btchID]] == "MGH26_1"] <- "MGH26_1"
+pData(sce)$Replicate[pData(sce)[[btchID]] == "MGH26_2"] <- "MGH26_2"
+pData(sce)$Replicate[pData(sce)[[btchID]] == "MGH30"] <- "MGH30_1"
+pData(sce)$Replicate[pData(sce)[[btchID]] == "MGH30L"] <- "MGH30_2"
+pData(sce)$Replicate[pData(sce)[[btchID]] == "CSC6"] <- "CSC6"
+pData(sce)$Replicate[pData(sce)[[btchID]] == "CSC8"] <- "CSC8"
+btchID <- "Replicate"
+sceRed <- sce[, pData(sce)[[grpID]] != "other"]
+scater::plotPCA(sceRed, colour_by = btchID, shape_by = grpID, ncomponents = 3)
+```
+
+Groups can be separated with PCs 1 and 2.
+On the first 2 PCs replicates for MG26 look very good.
+They seem to share the same covariance and almost the same centroid.
+Replicates for MG30 also seem to share the same covariance,
+but their centroids are far apart.
+On the higher PCs, these similarities don't hold anymore.
+
+```{r}
+plotDiffusionMap(sceRed, colour_by = btchID, shape_by = grpID, ncomponents = 3)
+cellDist(sceRed) <- as.matrix(dist(t(counts(sceRed)))) # euclid
+plotMDS(sceRed, colour_by = btchID, shape_by = grpID, ncomponents = 3)
+```
+
+The diffusion map paints a similar picture.
+MGH26 replicates seem to be closer, and there are some cells overlapping
+into the sphere of the other group.
+The MDS is hard to interpret before library size normalization.
+
+```{r}
+plotTSNE(sceRed, colour_by = btchID)
+```
+
+The tSNE shows that groups are mostly separable in the first 2 dimensions,
+with a few cells from MGH30 invading the space of MGH26.
+
+## Save
+
+```{r}
+saveRDS(sce, "intermediate_data/sce.rds")
+```
+
+
+
+
+
+
+***
