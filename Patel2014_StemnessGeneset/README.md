@@ -8,6 +8,12 @@ In a comparative transcriptomics experiment a geneset indicating *stemness* is d
 It is interesting to see how the results change if current state-of-the-art scRNA-seq analysis methods are used.
 All details are given [here](http://b210-research.dkfz.de/computational-genome-biology/scRNAseq/stemnessGeneset/).
 
+## Download Dataset
+
+Download *Patel2014* from [conquer](http://imlspenticton.uzh.ch:3838/conquer/)
+and save it as *GSE.rds* in the *data/* subdirectory.
+This file is quite large so I do not want to put it on github.
+
 ## Quality Control and Normalization
 
 Quality control and normalization are done using the `scater` framework.
