@@ -32,8 +32,8 @@ First, a stemness geneset is derived using scDD and edgeR (scDD runs for a while
 Then this geneset is compared to the one derived by Patel *et al*.
 GSEAs for both genesets are performed and compared as well.
 
-    Rscript -e 'rmarkdown::render("benchmarking_results.Rmd")'
-    Rscript -e 'rmarkdown::render("consensus_approach.Rmd")'
+    Rscript -e 'rmarkdown::render("StemnessGeneset.Rmd")'
+    Rscript -e 'rmarkdown::render("PatelSchwering.Rmd")'
 
 This will create 2 html reports, some intermediate data, and some results.
 
